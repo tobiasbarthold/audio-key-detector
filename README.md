@@ -1,5 +1,7 @@
 # audio-key-detector
 
+> **Work in progress.** Accuracy is still being improved (current check against 35 named loops: 37 % exact, 49 % incl. relative major/minor), and a VST3/AU plugin with a drag-and-drop app is in development.
+
 A small, fast command line tool that detects the musical key of audio samples and loops.
 Built for producers: drop in a folder of samples, get key, Camelot code, confidence and tuning.
 Only `numpy`, `scipy` and `soundfile` are needed (no librosa, no ML models).
