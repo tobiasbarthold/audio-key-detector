@@ -16,7 +16,7 @@ namespace kd
 class Resampler
 {
 public:
-    explicit Resampler (double sourceRate = 44100.0) { setSourceRate (sourceRate); }
+    explicit Resampler (double rate = 44100.0) { setSourceRate (rate); }
 
     void setSourceRate (double sourceRate);
     double getSourceRate() const noexcept { return sourceRate; }

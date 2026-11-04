@@ -6,6 +6,7 @@
 # Copyright (C) 2026 Tobias Barthold. GNU Affero General Public License v3.0.
 
 cmake_minimum_required(VERSION 3.22)
+cmake_policy(SET CMP0135 NEW)   # URL downloads: extraction time stamps
 
 set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "macOS architectures")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
@@ -51,3 +52,68 @@ target_link_libraries(KeyDetectCli PRIVATE
     juce::juce_audio_formats
     juce::juce_recommended_config_flags
     juce::juce_recommended_warning_flags)
+
+# ---------------------------------------------------------------- plugin (VST3 + AU)
+juce_add_plugin(KeyDetector
+    PRODUCT_NAME "Key Detector"
+    COMPANY_NAME "Tobias Barthold"
+    COMPANY_WEBSITE "https://github.com/tobiasbarthold/audio-key-detector"
+    BUNDLE_ID com.tobiasbarthold.keydetector
+    PLUGIN_MANUFACTURER_CODE Tbkd
+    PLUGIN_CODE Kdet
+    FORMATS VST3 AU
+    IS_SYNTH FALSE
+    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_OUTPUT FALSE
+    IS_MIDI_EFFECT FALSE
+    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+    AU_MAIN_TYPE kAudioUnitType_Effect
+    VST3_CATEGORIES Fx Analyzer
+    DESCRIPTION "Shows the musical key of the audio on its track"
+    COPY_PLUGIN_AFTER_BUILD FALSE)
+target_sources(KeyDetector PRIVATE
+    Source/Plugin/PluginProcessor.cpp
+    Source/Plugin/PluginEditor.cpp
+    Source/Plugin/LiveAnalyzer.cpp
+    ${KD_SHARED_SOURCES})
+target_compile_definitions(KeyDetector PUBLIC ${KD_COMMON_DEFINITIONS} JUCE_VST3_CAN_REPLACE_VST2=0)
+target_link_libraries(KeyDetector PRIVATE
+    kd_engine
+    juce::juce_audio_utils
+    juce::juce_audio_formats
+    PUBLIC
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_lto_flags
+    juce::juce_recommended_warning_flags)
+
+# ---------------------------------------------------------------- standalone app
+juce_add_gui_app(KeyDetectorApp
+    PRODUCT_NAME "Key Detector"
+    COMPANY_NAME "Tobias Barthold"
+    BUNDLE_ID com.tobiasbarthold.keydetector.app
+    DOCUMENT_EXTENSIONS wav aif aiff flac mp3 m4a ogg caf aac)
+target_sources(KeyDetectorApp PRIVATE
+    Source/App/Main.cpp
+    Source/App/MainComponent.cpp
+    ${KD_SHARED_SOURCES})
+target_compile_definitions(KeyDetectorApp PRIVATE
+    ${KD_COMMON_DEFINITIONS}
+    JUCE_APPLICATION_NAME_STRING="$<TARGET_PROPERTY:KeyDetectorApp,JUCE_PRODUCT_NAME>"
+    JUCE_APPLICATION_VERSION_STRING="$<TARGET_PROPERTY:KeyDetectorApp,JUCE_VERSION>")
+target_link_libraries(KeyDetectorApp PRIVATE
+    kd_engine
+    juce::juce_gui_extra
+    juce::juce_audio_formats
+    juce::juce_recommended_config_flags
+    juce::juce_recommended_lto_flags
+    juce::juce_recommended_warning_flags)
+
+# ---------------------------------------------------------------- live analysis test (not installed)
+juce_add_console_app(KeyDetectorLiveTest PRODUCT_NAME "KeyDetectorLiveTest")
+target_sources(KeyDetectorLiveTest PRIVATE tests/live_test.cpp Source/Plugin/LiveAnalyzer.cpp ${KD_SHARED_SOURCES})
+target_compile_definitions(KeyDetectorLiveTest PRIVATE ${KD_COMMON_DEFINITIONS})
+target_link_libraries(KeyDetectorLiveTest PRIVATE
+    kd_engine
+    juce::juce_audio_formats
+    juce::juce_events
+    juce::juce_recommended_config_flags)
