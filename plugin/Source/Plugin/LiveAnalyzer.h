@@ -40,8 +40,8 @@ public:
     // Audio thread: no locks, no allocation. Drops samples if the FIFO is full.
     void pushAudio (const juce::AudioBuffer<float>& buffer, int numChannels, int numSamples) noexcept;
 
-    // Any thread: clear everything heard so far and start over.
-    void requestReset() noexcept { resetRequested.store (true); notify(); }
+    // Any thread, also the audio thread (only sets a flag; the analysis thread polls it).
+    void requestReset() noexcept { resetRequested.store (true); }
 
     Snapshot getSnapshot() const;
 
