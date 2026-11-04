@@ -8,7 +8,7 @@ from typing import Iterable, List
 
 from . import __version__
 from .audio import AUDIO_EXTENSIONS
-from .detect import detect_key
+from .detect import DEFAULT_PROFILE, PROFILES, detect_key
 
 
 def collect_files(paths: Iterable[str]) -> List[str]:
@@ -28,12 +28,10 @@ def collect_files(paths: Iterable[str]) -> List[str]:
 def format_result(path: str, r) -> str:
     name = os.path.basename(path)
     if r.clear:
-        return "%s\n  %s  (%s)  confidence %.2f  |  2nd: %s (%s)  |  tuning %+.0f cents" % (
-            name, r.key, r.camelot, r.confidence, r.second_key, r.second_camelot, r.tuning_cents)
-    peak = "strongest around %.0f Hz (%s)" % (r.strongest_hz, r.strongest_note) if r.strongest_hz else ""
-    extra = "  (%s; best guess %s, confidence %.2f)" % (r.reason, r.best_guess, r.confidence) \
-        if r.best_guess else "  (%s)" % r.reason
-    return "%s\n  no clear key%s  %s" % (name, extra, peak)
+        return "%s\n  %s  (%s)  confidence %.2f  |  2nd: %s (%s)" % (
+            name, r.key, r.camelot, r.confidence, r.second_key, r.second_camelot)
+    guess = "; best guess %s" % r.best_guess if r.best_guess else ""
+    return "%s\n  no clear key  (%s%s)" % (name, r.reason, guess)
 
 
 def main(argv=None) -> int:
@@ -41,6 +39,8 @@ def main(argv=None) -> int:
         prog="keydetect", description="Detect the musical key of audio files (wav/aif/flac/mp3/m4a/ogg).")
     ap.add_argument("paths", nargs="+", help="audio files or folders (scanned recursively)")
     ap.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    ap.add_argument("--profile", default=DEFAULT_PROFILE, choices=sorted(PROFILES),
+                    help="Essentia key profile (default: %(default)s)")
     ap.add_argument("--version", action="version", version="keydetect " + __version__)
     args = ap.parse_args(argv)
 
@@ -52,7 +52,7 @@ def main(argv=None) -> int:
     out = []
     for f in files:
         try:
-            r = detect_key(f)
+            r = detect_key(f, args.profile)
         except Exception as exc:
             status = 1
             if args.json:
@@ -62,7 +62,7 @@ def main(argv=None) -> int:
             continue
         if args.json:
             d = r.to_dict()
-            d.pop("chroma", None)
+            d.pop("hpcp", None)
             d.pop("correlations", None)
             d["file"] = f
             out.append(d)

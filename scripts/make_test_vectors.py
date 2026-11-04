@@ -49,7 +49,8 @@ def main():
         r = detect_key(path).to_dict()
         r["file"] = name + ".wav"
         expected[name] = r
-        print(name, r["key"], r["camelot"], r["confidence"], r["tuning_cents"], r["tonality"], r["reason"])
+        print(name, r["key"], r["camelot"], r["second_key"], r["confidence"], r["strength"],
+              r["tonality"], r["reason"])
     with open(os.path.join(OUT, "expected.json"), "w") as f:
         json.dump(expected, f, indent=2)
         f.write("\n")

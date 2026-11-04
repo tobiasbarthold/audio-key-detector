@@ -3,21 +3,24 @@ import os
 import shutil
 import subprocess
 
+import essentia.standard as es
 import numpy as np
 import pytest
 import soundfile as sf
-from scipy.signal import butter, resample_poly, sosfilt
+from scipy.signal import butter, sosfilt
 
 from keydetect.cli import collect_files, main
-from keydetect.detect import SR as ANALYSIS_SR, analyze, camelot, detect_key, key_name
+from keydetect.detect import (SR as ANALYSIS_SR, _ESS_PC, analyze, camelot, confidence_from_strength,
+                              detect_key, key_name)
 
 from synth import SR, note, progression, scale
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+assert SR == ANALYSIS_SR
 
 
-def run(y, sr=SR):
-    return analyze(resample_poly(y, ANALYSIS_SR, sr).astype(np.float32), ANALYSIS_SR)
+def run(y):
+    return analyze(np.asarray(y, dtype=np.float32), ANALYSIS_SR)
 
 
 @pytest.mark.parametrize("pc", range(12))
@@ -26,7 +29,9 @@ def test_triad_progressions_all_keys(pc, minor):
     r = run(progression(pc, minor))
     assert r.clear
     assert r.key == key_name(pc, minor)
-    assert r.confidence > 0.0
+    assert r.camelot == camelot(pc, minor)
+    assert r.confidence > 0.5
+    assert r.second_key not in (None, r.key)
 
 
 @pytest.mark.parametrize("pc", range(12))
@@ -42,33 +47,36 @@ def test_minor_scale_is_minor_or_relative_major(pc):
 
 
 @pytest.mark.parametrize("cents", [-30, 30])
-def test_detuned_progression_key_and_tuning(cents):
-    r = run(progression(9, True, cents=cents))
-    assert r.key == "A minor"
-    assert abs(r.tuning_cents - cents) < 4
+def test_detuned_progression(cents):
+    assert run(progression(9, True, cents=cents)).key == "A minor"
 
 
-def test_in_tune_has_zero_tuning():
-    assert abs(run(progression(0, False)).tuning_cents) < 4
+@pytest.mark.parametrize("pc,minor", [(0, False), (9, True), (6, True), (10, False)])
+def test_same_result_as_essentia_key_extractor(pc, minor):
+    """The step-by-step chain must reproduce essentia.standard.KeyExtractor exactly."""
+    y = np.asarray(progression(pc, minor, cents=12), dtype=np.float32)
+    y = y + np.float32(0.01) * np.random.RandomState(pc).randn(len(y)).astype(np.float32)
+    for profile in ("shaath", "edma", "bgate"):
+        key, scale_, strength = es.KeyExtractor(profileType=profile)(y)
+        r = analyze(y, ANALYSIS_SR, profile)
+        assert r.best_guess == key_name(_ESS_PC[key], scale_ == "minor")
+        assert r.strength == pytest.approx(float(strength), abs=1e-5)
 
 
-@pytest.mark.parametrize("midi", [45, 57, 62, 66])
-def test_single_sustained_note_with_harmonics(midi):
-    r = run(note(midi, 3.0, cents=30))
-    assert abs(r.tuning_cents - 30) < 4
-    assert int(np.argmax(r.chroma)) == midi % 12   # fundamental's pitch class dominates
-    assert r.tonality > 0.3
+def test_correlations_rank_best_key_first():
+    r = run(progression(4, False))
+    corr = np.array(r.correlations)
+    assert len(corr) == 24 and len(r.hpcp) == 12
+    assert key_name(int(np.argmax(corr)) % 12, int(np.argmax(corr)) >= 12) == r.key
+    assert r.strength == pytest.approx(float(corr.max()), abs=1e-4)
+    i2 = int(np.argsort(corr)[-2])
+    assert r.second_key == key_name(i2 % 12, i2 >= 12)
 
 
-def test_harmonic_downweighting_reduces_fifth_bias(monkeypatch):
-    # a bass-heavy ostinato on C: the 3rd harmonic of every C sits on G
-    y = np.concatenate([note(36, 0.5, harmonics=8), note(36, 0.5, harmonics=8), note(39, 0.5, harmonics=8),
-                        note(36, 0.5, harmonics=8)] * 2)
-    with_discount = run(y)
-    monkeypatch.setattr("keydetect.detect.HARM_K", 0.0)
-    without = run(y)
-    assert with_discount.chroma[7] < without.chroma[7]           # less G
-    assert int(np.argmax(with_discount.chroma)) == 0              # C stays on top
+def test_confidence_mapping():
+    assert confidence_from_strength(0.3) == 0.0
+    assert confidence_from_strength(0.7) == pytest.approx(0.5)
+    assert confidence_from_strength(0.99) == 1.0
 
 
 def test_white_noise_has_no_clear_key():
@@ -77,12 +85,16 @@ def test_white_noise_has_no_clear_key():
     assert r.reason == "mostly noise"
 
 
-def test_bandpassed_noise_reports_strongest_frequency():
+def test_bandpassed_noise_has_no_clear_key():
     sos = butter(4, [900 / (SR / 2), 1060 / (SR / 2)], btype="band", output="sos")
     y = sosfilt(sos, np.random.RandomState(1).randn(3 * SR))
     r = run(y / np.max(np.abs(y)))
-    assert not r.clear
-    assert 900 < r.strongest_hz < 1060
+    assert not r.clear and r.reason == "mostly noise"
+
+
+def test_pitched_material_has_high_tonality():
+    assert run(note(57, 3.0)).tonality > 0.3
+    assert run(progression(0, False)).tonality > 0.3
 
 
 def test_silence():
@@ -91,7 +103,8 @@ def test_silence():
 
 
 def test_very_short_file_does_not_crash():
-    assert run(note(60, 0.1)).tonality >= 0
+    assert run(note(60, 0.05)).tonality >= 0
+    assert run(np.zeros(10)).reason == "silence"
 
 
 def test_camelot_codes():
@@ -142,21 +155,27 @@ def test_cli_folder_scan_and_json(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     by = {os.path.basename(d["file"]): d for d in data}
     assert by["amin.wav"]["key"] == "A minor" and by["amin.wav"]["camelot"] == "8A"
-    assert by["noise.flac"]["key"] is None
+    assert by["noise.flac"]["key"] is None and by["noise.flac"]["reason"] == "mostly noise"
 
 
 def test_cli_text_output(tmp_path, capsys):
     sf.write(str(tmp_path / "c.wav"), progression(0, False), SR)
     assert main([str(tmp_path / "c.wav")]) == 0
     out = capsys.readouterr().out
-    assert "C major" in out and "8B" in out and "cents" in out
+    assert "C major" in out and "8B" in out and "confidence" in out and "2nd:" in out
+
+
+def test_cli_profile_option(tmp_path, capsys):
+    sf.write(str(tmp_path / "c.wav"), progression(0, False), SR)
+    assert main(["--json", "--profile", "edma", str(tmp_path / "c.wav")]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["profile"] == "edma"
 
 
 def test_cli_missing_file_returns_error(tmp_path, capsys):
     assert main([str(tmp_path / "nope.wav")]) == 1
 
 
-# ----- reference vectors for ports ---------------------------------------------
+# ----- reference vectors (the C++ engine is checked against the same file) ----
 
 def test_reference_vectors_still_match():
     with open(os.path.join(HERE, "vectors", "expected.json")) as f:
@@ -164,8 +183,17 @@ def test_reference_vectors_still_match():
     assert len(expected) >= 5
     for name, exp in expected.items():
         got = detect_key(os.path.join(HERE, "vectors", name + ".wav")).to_dict()
-        for k in ("key", "camelot", "second_key", "reason", "clear"):
+        for k in ("key", "camelot", "second_key", "reason", "clear", "best_guess"):
             assert got[k] == exp[k], (name, k)
-        assert got["tuning_cents"] == pytest.approx(exp["tuning_cents"], abs=0.2)
-        assert got["confidence"] == pytest.approx(exp["confidence"], abs=0.02)
-        assert got["tonality"] == pytest.approx(exp["tonality"], abs=0.01)
+        for k in ("confidence", "strength", "tonality"):
+            assert got[k] == pytest.approx(exp[k], abs=0.002), (name, k)
+
+
+ABLETON_NOISE = ("/Applications/Ableton Live 12 Suite.app/Contents/App-Resources/Core Library/"
+                 "Samples/One Shots/FX/Swell Short Noise.wav")
+
+
+@pytest.mark.skipif(not os.path.exists(ABLETON_NOISE), reason="needs Ableton Live 12 Suite Core Library")
+def test_ableton_swell_short_noise_has_no_clear_key():
+    r = detect_key(ABLETON_NOISE)
+    assert not r.clear and r.reason == "mostly noise"

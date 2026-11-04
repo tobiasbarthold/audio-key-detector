@@ -1,106 +1,77 @@
-"""Key detection: peak-based chroma with tuning compensation + key-profile correlation.
+"""Key detection with Essentia's KeyExtractor (HPCP + key profiles).
 
-Pipeline
---------
-1. Mono signal at 22.05 kHz, STFT (8192 window, 2048 hop, Hann).
-2. Per frame: pick spectral peaks (local maxima that stand >= 10 dB above the
-   local average spectrum, 50 Hz - 5 kHz) and refine them by parabolic
-   interpolation. Noise rarely produces such peaks, so noisy material yields
-   a low "tonality" score and few/no peaks.
-3. Tuning: the deviation of every peak from the nearest 12-TET semitone
-   (A4 = 440 Hz) is averaged on the circle (period 100 cents), weighted by
-   peak magnitude -> one tuning offset in cents for the whole file.
-4. Chroma: peaks are mapped to pitch classes after subtracting the tuning
-   offset, weighted by magnitude (compressed), a low-mid register window
-   (centred near G3, so rumble and hiss count little) and closeness to the
-   semitone centre. A peak that is probably the 3rd, 5th or 7th harmonic of a
-   lower, louder partial (the lower partial is present in the same frame) is
-   down-weighted, which reduces fifth / third errors on bass-heavy material.
-   Frames are normalised so loud transients do not dominate.
-5. The averaged chroma is correlated (Pearson) with 24 rotated key profiles
-   from four profile sets - Krumhansl-Kessler, Temperley, and two profiles
-   learned from electronic dance music by Faraldo et al. (EDMA, BRAW) - and
-   the four correlation vectors are averaged. KK is the classic, but is known
-   to favour major and the dominant; Temperley is flatter for pop harmony;
-   the EDM profiles describe loop-based electronic music. Averaging reduces
-   the bias of any single set.
-6. Confidence = (best - second best correlation) / 0.15, clipped to 0..1.
-   "No clear key" is reported when tonality is low (mostly noise), when there
-   is hardly any pitched content, or when confidence is very low. Exact
-   numbers: docs/ALGORITHM.md.
+The pipeline is exactly the one of Essentia's ``KeyExtractor`` with default settings
+(FrameCutter 4096/4096, Hann window, Spectrum, SpectralPeaks, SpectralWhitening, HPCP, Key);
+it is run step by step in Essentia's standard mode so the averaged HPCP is available. From it
+all 24 key correlations are computed (same formula as Essentia's ``Key``), which gives the
+second-best key. The key and strength themselves come from Essentia's ``Key`` algorithm.
+
+The C++ plugin (plugin/Source/KeyEngine.cpp) implements the same steps with Essentia's C++
+library; see docs/ALGORITHM.md.
 """
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from typing import Dict, Optional
 
 import numpy as np
-from scipy.ndimage import uniform_filter1d
 
-from .audio import load_audio
+import essentia
 
-SR = 22050
-N_FFT = 8192
-HOP = 2048
-FMIN = 50.0
-FMAX = 5000.0
-MAX_SECONDS = 240.0  # analyse the middle 4 minutes of very long files
+essentia.log.infoActive = False
+essentia.log.warningActive = False
+import essentia.standard as es  # noqa: E402
 
-PEAK_RATIO = 10.0          # peak power vs local average power
-NOISE_TONALITY = 0.05     # below: "mostly noise"
-MIN_CONFIDENCE = 0.02      # below: "no clear key"
-MIN_BEST_CORR = 0.35
-REG_CENTER = 55.0          # register weight: Gaussian over MIDI pitch
-REG_SIGMA = 20.0
-MAG_EXP = 0.5              # peak magnitude compression exponent
-HARM_ORDERS = (3, 5, 7)    # peak may be this harmonic of a lower partial
-HARM_K = 3.0               # strength of the harmonic down-weighting
+from .audio import load_audio  # noqa: E402
+
+SR = 44100                 # Essentia's KeyExtractor defaults
+FRAME_SIZE = 4096
+HOP_SIZE = 4096
+MIN_FREQ = 25.0
+MAX_FREQ = 3500.0
+MAX_PEAKS = 60
+PEAK_THRESHOLD = 1e-4
+PCP_THRESHOLD = 0.2
+MAX_SECONDS = 240.0        # analyse the middle 4 minutes of very long files
+
+DEFAULT_PROFILE = "shaath"
+# Strength (Pearson correlation of the best key profile) -> confidence 0..1, linear
+CONF_LO = 0.5
+CONF_HI = 0.9
+# "No clear key" gate (see docs/ALGORITHM.md): tonality = share of the 50 Hz - 5 kHz energy
+# that sits in clear spectral peaks (16384-sample frames, peak > 10x local average power)
+TONAL_FRAME = 16384
+TONAL_FMIN = 50.0
+TONAL_FMAX = 5000.0
+TONAL_PEAK_RATIO = 10.0
+TONAL_AVG_BINS = 41
+NOISE_TONALITY = 0.025     # below: "mostly noise"
+SILENCE_PEAK = 1e-5        # max |sample| below: "silence"
 
 NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MINOR_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"]
-SHARP_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+# Essentia's key names -> pitch class (Essentia's HPCP bin 0 is A, reference 440 Hz)
+_ESS_PC = {"A": 9, "Bb": 10, "B": 11, "C": 0, "C#": 1, "D": 2, "Eb": 3, "E": 4, "F": 5,
+           "F#": 6, "G": 7, "Ab": 8, "G#": 8, "Db": 1, "D#": 3, "A#": 10, "Gb": 6}
 
-KK_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
-KK_MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
-TEMP_MAJOR = [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0]
-TEMP_MINOR = [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0]
-# Faraldo et al. (2016) EDMA and (2017) BRAW profiles, numbers as published / distributed with Essentia
-EDMA_MAJOR = [1.00, 0.29, 0.50, 0.40, 0.60, 0.56, 0.32, 0.80, 0.31, 0.45, 0.42, 0.39]
-EDMA_MINOR = [1.00, 0.31, 0.44, 0.58, 0.33, 0.49, 0.29, 0.78, 0.43, 0.29, 0.53, 0.32]
-BRAW_MAJOR = [1.0000, 0.1573, 0.4200, 0.1570, 0.5296, 0.3669, 0.1632, 0.7711, 0.1676, 0.3827, 0.2113, 0.2965]
-BRAW_MINOR = [1.0000, 0.2330, 0.3615, 0.3905, 0.2925, 0.3777, 0.1961, 0.7425, 0.2701, 0.2161, 0.4228, 0.2272]
-PROFILE_SETS = [(KK_MAJOR, KK_MINOR), (TEMP_MAJOR, TEMP_MINOR),
-                (EDMA_MAJOR, EDMA_MINOR), (BRAW_MAJOR, BRAW_MINOR)]
+# Key profiles as in Essentia's key.cpp (index 0 = tonic). Only used to rank all 24 keys
+# for the second-best key; the best key itself comes from essentia.standard.Key.
+PROFILES = {
+    "shaath": ([6.6, 2.0, 3.5, 2.3, 4.6, 4.0, 2.5, 5.2, 2.4, 3.7, 2.3, 3.4],
+               [6.5, 2.7, 3.5, 5.4, 2.6, 3.5, 2.5, 5.2, 4.0, 2.7, 4.3, 3.2]),
+    "edma": ([1.00, 0.29, 0.50, 0.40, 0.60, 0.56, 0.32, 0.80, 0.31, 0.45, 0.42, 0.39],
+             [1.00, 0.31, 0.44, 0.58, 0.33, 0.49, 0.29, 0.78, 0.43, 0.29, 0.53, 0.32]),
+    "bgate": ([1.00, 0.00, 0.42, 0.00, 0.53, 0.37, 0.00, 0.77, 0.00, 0.38, 0.21, 0.30],
+              [1.00, 0.00, 0.36, 0.39, 0.00, 0.38, 0.00, 0.74, 0.27, 0.00, 0.42, 0.23]),
+}
 
 
 def key_name(pc: int, minor: bool) -> str:
-    return "%s %s" % ((MINOR_NAMES if minor else NOTE_NAMES)[pc], "minor" if minor else "major")
+    return "%s %s" % ((MINOR_NAMES if minor else NOTE_NAMES)[pc % 12], "minor" if minor else "major")
 
 
 def camelot(pc: int, minor: bool) -> str:
-    if minor:
-        return "%dA" % ((7 * ((pc + 3) % 12) + 7) % 12 + 1)
-    return "%dB" % ((7 * pc + 7) % 12 + 1)
-
-
-def _profile_matrix() -> np.ndarray:
-    """(4, 24, 12): profile sets x keys (12 major then 12 minor) x pitch classes."""
-    out = np.zeros((len(PROFILE_SETS), 24, 12))
-    for s, (maj, mnr) in enumerate(PROFILE_SETS):
-        for pc in range(12):
-            out[s, pc] = np.roll(maj, pc)
-            out[s, 12 + pc] = np.roll(mnr, pc)
-    out -= out.mean(axis=2, keepdims=True)
-    out /= np.linalg.norm(out, axis=2, keepdims=True)
-    return out
-
-
-_PROFILES = _profile_matrix()
-
-
-def freq_to_note(freq: float) -> str:
-    midi = 69 + 12 * np.log2(freq / 440.0)
-    n = int(round(midi))
-    return "%s%d" % (SHARP_NAMES[n % 12], n // 12 - 1)
+    ref = (pc + 3) % 12 if minor else pc % 12          # relative major for minor keys
+    return "%d%s" % (((7 * ref + 7) % 12) + 1, "A" if minor else "B")
 
 
 @dataclass
@@ -108,179 +79,188 @@ class KeyResult:
     clear: bool
     key: Optional[str]            # None when no clear key
     camelot: Optional[str]
-    confidence: float
+    confidence: float             # 0..1, mapped from Essentia's strength
     second_key: Optional[str]
     second_camelot: Optional[str]
-    tuning_cents: float
-    tonality: float               # 0 (noise) .. 1 (purely pitched)
+    strength: float               # Essentia's key strength (correlation of the best key)
+    tonality: float               # 0 (noise) .. 1 (purely pitched), see ALGORITHM.md
     reason: str = ""              # why there is no clear key
     best_guess: Optional[str] = None
-    strongest_hz: Optional[float] = None
-    strongest_note: Optional[str] = None
-    chroma: list = field(default_factory=list)
-    correlations: list = field(default_factory=list)  # 24 values: 12 major then 12 minor (C..B)
-    n_peaks: int = 0
+    profile: str = DEFAULT_PROFILE
+    hpcp: list = None             # 12 bins, C..B, averaged and normalised (max 1)
+    correlations: list = None     # 24 values: C..B major, then C..B minor
 
     def to_dict(self) -> Dict:
         d = asdict(self)
-        d["confidence"] = round(d["confidence"], 3)
-        d["tuning_cents"] = round(d["tuning_cents"], 1)
-        d["tonality"] = round(d["tonality"], 3)
-        d["chroma"] = [round(float(x), 4) for x in d["chroma"]]
-        d["correlations"] = [round(float(x), 4) for x in d["correlations"]]
-        if d["strongest_hz"] is not None:
-            d["strongest_hz"] = round(d["strongest_hz"], 1)
+        for k in ("confidence", "strength", "tonality"):
+            d[k] = round(float(d[k]), 3)
+        for k in ("hpcp", "correlations"):
+            if d[k] is not None:
+                d[k] = [round(float(x), 4) for x in d[k]]
         return d
 
 
-def _frames(y: np.ndarray) -> np.ndarray:
-    if len(y) < N_FFT:
-        y = np.pad(y, (0, N_FFT - len(y)))
-    n = 1 + (len(y) - N_FFT) // HOP
-    idx = np.arange(N_FFT)[None, :] + HOP * np.arange(n)[:, None]
-    return y[idx]
+def confidence_from_strength(strength: float) -> float:
+    return float(np.clip((strength - CONF_LO) / (CONF_HI - CONF_LO), 0.0, 1.0))
 
 
-def _spectrum(y: np.ndarray):
-    win = np.hanning(N_FFT).astype(np.float32)
-    mags = []
-    frames = _frames(y)
-    for i in range(0, len(frames), 256):  # chunked to bound memory
-        mags.append(np.abs(np.fft.rfft(frames[i:i + 256] * win, axis=1)))
-    return np.concatenate(mags).astype(np.float32)
+class _Chain:
+    """Essentia standard-mode algorithms of KeyExtractor (created once, reused)."""
+
+    def __init__(self, sr: int = SR):
+        self.window = es.Windowing(size=FRAME_SIZE, type="hann")
+        self.spectrum = es.Spectrum(size=FRAME_SIZE)
+        self.peaks = es.SpectralPeaks(orderBy="magnitude", magnitudeThreshold=PEAK_THRESHOLD,
+                                      minFrequency=MIN_FREQ, maxFrequency=MAX_FREQ,
+                                      maxPeaks=MAX_PEAKS, sampleRate=sr)
+        self.whitening = es.SpectralWhitening(maxFrequency=MAX_FREQ, sampleRate=sr)
+        self.hpcp = es.HPCP(bandPreset=False, harmonics=4, maxFrequency=MAX_FREQ,
+                            minFrequency=MIN_FREQ, nonLinear=False, normalized="none",
+                            referenceFrequency=440, sampleRate=sr, size=12,
+                            weightType="cosine", windowSize=1.0, maxShifted=False)
+        self.tonal_window = es.Windowing(size=TONAL_FRAME, type="hann")
+        self.tonal_spectrum = es.Spectrum(size=TONAL_FRAME)
+        self.keys = {}
+
+    def key_algo(self, profile: str):
+        if profile not in self.keys:
+            self.keys[profile] = es.Key(usePolyphony=False, useThreeChords=False, numHarmonics=4,
+                                        slope=0.6, profileType=profile, pcpSize=12)
+        return self.keys[profile]
 
 
-def analyze(y: np.ndarray, sr: int = SR) -> KeyResult:
-    """Detect the key of a mono signal sampled at `sr` (expected SR)."""
+_CHAIN = None
+
+
+def _chain() -> _Chain:
+    global _CHAIN
+    if _CHAIN is None:
+        _CHAIN = _Chain()
+    return _CHAIN
+
+
+def mean_hpcp(y: np.ndarray) -> np.ndarray:
+    """Average HPCP over all frames (Essentia order: bin 0 = A), as KeyExtractor computes it."""
+    ch = _chain()
+    hp = []
+    for frame in _frames(y, FRAME_SIZE, HOP_SIZE):
+        spec = ch.spectrum(ch.window(frame))
+        freqs, mags = ch.peaks(spec)
+        hp.append(ch.hpcp(freqs, ch.whitening(spec, freqs, mags)))
+    if not hp:
+        return np.zeros(12, dtype=np.float32)
+    return np.mean(np.array(hp, dtype=np.float32), axis=0)
+
+
+def tonality(y: np.ndarray, sr: int = SR) -> float:
+    """Share of the 50 Hz - 5 kHz energy that sits in clear spectral peaks (0 = noise)."""
+    ch = _chain()
+    k = np.arange(TONAL_FRAME // 2 + 1) * (sr / TONAL_FRAME)
+    lo = int(np.searchsorted(k, TONAL_FMIN))
+    hi = int(np.searchsorted(k, TONAL_FMAX))
+    energies, peaks = [], []
+    for frame in _frames(y, TONAL_FRAME, TONAL_FRAME, start_from_zero=True):
+        mag = ch.tonal_spectrum(ch.tonal_window(frame))
+        p = mag[lo - 1:hi + 1].astype(np.float64) ** 2            # one guard bin each side
+        local = _moving_average(p, TONAL_AVG_BINS) + 1e-20
+        c = p[1:-1]
+        is_peak = (c > p[:-2]) & (c >= p[2:]) & (c > TONAL_PEAK_RATIO * local[1:-1])
+        energies.append(float(np.sum(p)))
+        peaks.append(float(np.sum(c[is_peak])))
+    if not energies:
+        return 0.0
+    e = np.array(energies)
+    keep = e > 1e-4 * e.max()
+    tot = float(e[keep].sum())
+    return float(np.clip(np.array(peaks)[keep].sum() / tot, 0.0, 1.0)) if tot > 0 else 0.0
+
+
+def _moving_average(p: np.ndarray, n: int) -> np.ndarray:
+    """Centred moving average over n bins, edges replicated (scipy uniform_filter1d 'nearest')."""
+    h = n // 2
+    padded = np.concatenate([np.full(h, p[0]), p, np.full(h, p[-1])])
+    c = np.concatenate([[0.0], np.cumsum(padded)])
+    return (c[n:] - c[:-n]) / n
+
+
+def _frames(y: np.ndarray, size: int, hop: int, start_from_zero: bool = False):
+    fc = es.FrameCutter(frameSize=size, hopSize=hop, startFromZero=start_from_zero)
+    while True:
+        frame = fc(y)
+        if len(frame) == 0:
+            return
+        yield frame
+
+
+def prepare_pcp(mean_hpcp: np.ndarray) -> np.ndarray:
+    """Normalise to max 1 and zero bins below PCP_THRESHOLD (as Essentia's streaming Key)."""
+    p = np.asarray(mean_hpcp, dtype=np.float32).copy()
+    m = float(np.max(p)) if len(p) else 0.0
+    if m > 0:
+        p = p / np.float32(m)
+    p[p < PCP_THRESHOLD] = 0.0
+    return p
+
+
+def correlations(pcp_ess: np.ndarray, profile: str) -> np.ndarray:
+    """Pearson correlation of the PCP with all 24 rotated profiles, as in Essentia's Key.
+
+    Returned in this project's order: index 0..11 = C..B major, 12..23 = C..B minor.
+    """
+    pcp = np.asarray(pcp_ess, dtype=np.float64)
+    out = np.zeros(24)
+    pc0 = pcp - pcp.mean()
+    sp = np.sqrt(np.sum(pc0 ** 2))
+    for mode, prof in enumerate(PROFILES[profile]):
+        prof = np.asarray(prof, dtype=np.float64)
+        pr0 = prof - prof.mean()
+        sq = np.sqrt(np.sum(pr0 ** 2))
+        for shift in range(12):           # shift = essentia bin of the tonic (0 = A)
+            r = 0.0 if sp == 0 or sq == 0 else float(np.dot(pc0, np.roll(pr0, shift)) / (sp * sq))
+            out[mode * 12 + (shift + 9) % 12] = r
+    return out
+
+
+def _result_from_hpcp(hpcp: np.ndarray, tonal: float, profile: str) -> KeyResult:
+    pcp = prepare_pcp(hpcp)
+    if float(np.max(pcp)) <= 0:
+        return KeyResult(False, None, None, 0.0, None, None, 0.0, tonal,
+                         reason="no pitched content", profile=profile)
+    key, scale, strength, _ = _chain().key_algo(profile)(pcp)
+    strength = float(strength)
+    minor = scale == "minor"
+    pc = _ESS_PC[key]
+    best = pc + (12 if minor else 0)
+    corr = correlations(pcp, profile)
+    second = int([i for i in np.argsort(-corr, kind="stable") if i != best][0])
+    k1, c1 = key_name(pc, minor), camelot(pc, minor)
+    k2, c2 = key_name(second % 12, second >= 12), camelot(second % 12, second >= 12)
+    reason = "mostly noise" if tonal < NOISE_TONALITY else ""
+    clear = reason == ""
+    return KeyResult(clear=clear, key=k1 if clear else None, camelot=c1 if clear else None,
+                     confidence=confidence_from_strength(strength), second_key=k2,
+                     second_camelot=c2, strength=strength, tonality=tonal, reason=reason,
+                     best_guess=k1, profile=profile,
+                     hpcp=[float(pcp[(i + 3) % 12]) for i in range(12)],   # A..Ab -> C..B
+                     correlations=corr.tolist())
+
+
+def analyze(y: np.ndarray, sr: int = SR, profile: str = DEFAULT_PROFILE) -> KeyResult:
+    """Detect the key of a mono float32 signal sampled at 44.1 kHz."""
     assert sr == SR
+    y = np.ascontiguousarray(y, dtype=np.float32)
     if len(y) > MAX_SECONDS * sr:
         mid = len(y) // 2
         half = int(MAX_SECONDS * sr / 2)
         y = y[mid - half:mid + half]
-    y = y - np.mean(y)
     peak = float(np.max(np.abs(y))) if len(y) else 0.0
-    if peak < 1e-5:
-        return KeyResult(False, None, None, 0.0, None, None, 0.0, 0.0, reason="silence")
-    mag = _spectrum(y)
-    freqs = np.fft.rfftfreq(N_FFT, 1.0 / sr)
-    lo, hi = int(np.searchsorted(freqs, FMIN)), int(np.searchsorted(freqs, FMAX))
-    band = mag[:, lo - 1:hi + 1]                       # one guard bin each side
-    power = band.astype(np.float64) ** 2
-    local = uniform_filter1d(power, size=41, axis=1, mode="nearest") + 1e-20
-
-    # peaks: local maxima standing well above the local average
-    p = power[:, 1:-1]
-    is_peak = (p > power[:, :-2]) & (p >= power[:, 2:]) & (p > PEAK_RATIO * local[:, 1:-1])
-    frame_energy = power.sum(axis=1)
-    keep = frame_energy > 1e-4 * frame_energy.max()      # skip near-silent frames
-    is_peak &= keep[:, None]
-    fi, bi = np.nonzero(is_peak)
-    bi = bi + 1                                          # index into `band`
-    a, b, c = (np.log(band[fi, bi - 1] + 1e-12), np.log(band[fi, bi] + 1e-12),
-               np.log(band[fi, bi + 1] + 1e-12))
-    denom = a - 2 * b + c
-    delta = np.where(np.abs(denom) > 1e-9, 0.5 * (a - c) / denom, 0.0)
-    delta = np.clip(delta, -0.5, 0.5)
-    bin_hz = freqs[1] - freqs[0]
-    pf = freqs[lo - 1] + (bi + delta) * bin_hz           # peak frequencies
-    pm = band[fi, bi].astype(np.float64)                 # peak magnitudes
-
-    # tonality: share of the in-band energy that sits in peaks
-    peak_energy = np.zeros(len(band))
-    np.add.at(peak_energy, fi, power[fi, bi])
-    w_frame = np.where(keep, frame_energy, 0.0)
-    tonality = float((peak_energy * keep).sum() / max(w_frame.sum(), 1e-20))
-    tonality = float(np.clip(tonality, 0.0, 1.0))
-
-    # strongest region of the long-term spectrum (reported for noisy material)
-    mean_spec = uniform_filter1d(power[keep].mean(axis=0), size=3)
-    k = int(np.argmax(mean_spec))
-    strongest_hz = float(freqs[lo - 1 + k])
-    if 0 < k < len(mean_spec) - 1:
-        a_, b_, c_ = np.log(mean_spec[k - 1:k + 2] + 1e-20)
-        d_ = a_ - 2 * b_ + c_
-        if abs(d_) > 1e-9:
-            strongest_hz += float(np.clip(0.5 * (a_ - c_) / d_, -0.5, 0.5)) * float(freqs[1] - freqs[0])
-    strongest_note = freq_to_note(strongest_hz)
-
-    def result(**kw):
-        base = dict(tonality=tonality, strongest_hz=strongest_hz, strongest_note=strongest_note,
-                    n_peaks=int(len(pf)))
-        base.update(kw)
-        return KeyResult(**base)
-
-    if len(pf) < 8:
-        return result(clear=False, key=None, camelot=None, confidence=0.0, second_key=None,
-                      second_camelot=None, tuning_cents=0.0,
-                      reason="mostly noise" if tonality < NOISE_TONALITY else "no pitched content")
-
-    # tuning estimate: circular mean of semitone deviation, weighted by magnitude
-    midi = 69.0 + 12.0 * np.log2(pf / 440.0)
-    w = np.sqrt(pm)
-    phase = 2j * np.pi * midi
-    z = np.sum(w * np.exp(phase)) / np.sum(w)
-    tuning = float(np.angle(z) / (2 * np.pi) * 100.0)    # cents, -50..50
-
-    # harmonic down-weighting: a peak that is the h-th harmonic (h = 3, 5, 7) of a
-    # lower partial present in the same frame is probably not a note of its own
-    acc = np.zeros(len(pf))
-    for h in HARM_ORDERS:
-        fb = (pf / h - freqs[lo - 1]) / bin_hz
-        idx = np.clip(np.round(fb).astype(int), 1, band.shape[1] - 2)
-        sub = np.maximum(np.maximum(band[fi, idx - 1], band[fi, idx]), band[fi, idx + 1])
-        acc += np.where(fb >= 1.0, np.minimum(sub / pm, 1.0), 0.0)
-    harm = 1.0 / (1.0 + HARM_K * acc)
-
-    # chroma
-    midi_c = midi - tuning / 100.0
-    nearest = np.round(midi_c)
-    resid = midi_c - nearest
-    pc = (nearest.astype(int)) % 12
-    reg = np.exp(-0.5 * ((nearest - REG_CENTER) / REG_SIGMA) ** 2)
-    wt = np.power(pm, MAG_EXP) * reg * (0.5 + 0.5 * np.cos(2 * np.pi * resid)) * harm
-    frame_chroma = np.zeros((len(band), 12))
-    np.add.at(frame_chroma, (fi, pc), wt)
-    tot = frame_chroma.sum(axis=1, keepdims=True)
-    frame_chroma = np.where(tot > 0, frame_chroma / np.maximum(tot, 1e-20), 0.0)
-    fw = np.sqrt(np.maximum(frame_energy, 0.0)) * keep
-    chroma = (frame_chroma * fw[:, None]).sum(axis=0)
-    if chroma.sum() <= 0:
-        return result(clear=False, key=None, camelot=None, confidence=0.0, second_key=None,
-                      second_camelot=None, tuning_cents=tuning, reason="no pitched content")
-    chroma = chroma / chroma.sum()
-
-    # correlate with the 24 keys of both profile sets, average
-    c = chroma - chroma.mean()
-    cn = np.linalg.norm(c)
-    if cn < 1e-12:
-        corr = np.zeros(24)
-    else:
-        corr = (_PROFILES @ (c / cn)).mean(axis=0)       # (24,)
-    order = np.argsort(corr)[::-1]
-    b1, b2 = int(order[0]), int(order[1])
-    margin = float(corr[b1] - corr[b2])
-    confidence = float(np.clip(margin / 0.15, 0.0, 1.0))
-
-    def name(i):
-        return key_name(i % 12, i >= 12), camelot(i % 12, i >= 12)
-
-    k1, c1 = name(b1)
-    k2, c2 = name(b2)
-    reason = ""
-    if tonality < NOISE_TONALITY:
-        reason = "mostly noise"
-    elif corr[b1] < MIN_BEST_CORR or confidence < MIN_CONFIDENCE:
-        reason = "ambiguous / atonal"
-    clear = reason == ""
-    return KeyResult(
-        clear=clear, key=k1 if clear else None, camelot=c1 if clear else None,
-        confidence=confidence, second_key=k2, second_camelot=c2, tuning_cents=tuning,
-        tonality=tonality, reason=reason, best_guess=k1,
-        strongest_hz=strongest_hz, strongest_note=strongest_note, chroma=chroma.tolist(),
-        correlations=corr.tolist(), n_peaks=int(len(pf)))
+    if peak < SILENCE_PEAK:
+        return KeyResult(False, None, None, 0.0, None, None, 0.0, 0.0, reason="silence",
+                         profile=profile)
+    return _result_from_hpcp(mean_hpcp(y), tonality(y, sr), profile)
 
 
-def detect_key(path: str) -> KeyResult:
+def detect_key(path: str, profile: str = DEFAULT_PROFILE) -> KeyResult:
     """Load an audio file (any supported format) and detect its key."""
     y, sr = load_audio(path, SR)
-    return analyze(y, sr)
+    return analyze(y, sr, profile)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Compare detected keys with keys written in file names (e.g. "Synth Fm 135 bpm.wav").
 
-    python scripts/eval_named_loops.py <folder> [--extra <folder> ...] [--quiet]
+    python scripts/eval_named_loops.py <folder> [--extra <folder> ...] [--profile NAME] [--quiet]
 
 Samples are only read, never copied. The files of <folder> are sorted by name and split
 deterministically: even positions (0, 2, ...) are the "tuning" half (the only files that
@@ -19,7 +19,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from keydetect.cli import collect_files  # noqa: E402
-from keydetect.detect import camelot, detect_key  # noqa: E402
+from keydetect.detect import DEFAULT_PROFILE, camelot, detect_key  # noqa: E402
 
 TOK = re.compile(r"(?:^|\s)([A-G][#b]?)\s?(Minor|minor|min|Maj|maj|Major|m)?(?=\s|\.|\d|$)")
 PC = {"C": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3, "E": 4, "F": 5, "F#": 6, "Gb": 6,
@@ -45,14 +45,14 @@ def parse(key):
             "A": 9, "Bb": 10, "B": 11}[tonic], mode == "minor"
 
 
-def evaluate(path, only_mode=False):
+def evaluate(path, only_mode=False, profile=DEFAULT_PROFILE):
     rows = []
     files = sorted(collect_files([path]), key=lambda f: os.path.basename(f))
     for f in files:
         exp = expected(os.path.basename(f))
         if exp is None or (only_mode and exp[1] is None):
             continue
-        r = detect_key(f)
+        r = detect_key(f, profile)
         name = os.path.splitext(os.path.basename(f))[0]
         if not r.clear:
             rows.append((name, exp, "no clear key", "miss"))
@@ -84,8 +84,10 @@ def main():
     args = sys.argv[1:]
     quiet = "--quiet" in args
     extras = [args[i + 1] for i, a in enumerate(args) if a == "--extra"]
-    folder = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or args[i - 1] != "--extra")][0]
-    rows = evaluate(folder)
+    profile = [args[i + 1] for i, a in enumerate(args) if a == "--profile"] or [DEFAULT_PROFILE]
+    folder = [a for i, a in enumerate(args)
+              if not a.startswith("--") and (i == 0 or args[i - 1] not in ("--extra", "--profile"))][0]
+    rows = evaluate(folder, profile=profile[0])
     names = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
     halves = {"tuning": rows[0::2], "holdout": rows[1::2]}
     if not quiet:
@@ -99,7 +101,7 @@ def main():
     summary("total", rows)
     ex = []
     for e in extras:
-        ex += evaluate(e, only_mode=True)
+        ex += evaluate(e, only_mode=True, profile=profile[0])
     summary("extra holdout", ex)
 
 
