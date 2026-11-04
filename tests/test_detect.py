@@ -60,6 +60,17 @@ def test_single_sustained_note_with_harmonics(midi):
     assert r.tonality > 0.3
 
 
+def test_harmonic_downweighting_reduces_fifth_bias(monkeypatch):
+    # a bass-heavy ostinato on C: the 3rd harmonic of every C sits on G
+    y = np.concatenate([note(36, 0.5, harmonics=8), note(36, 0.5, harmonics=8), note(39, 0.5, harmonics=8),
+                        note(36, 0.5, harmonics=8)] * 2)
+    with_discount = run(y)
+    monkeypatch.setattr("keydetect.detect.HARM_K", 0.0)
+    without = run(y)
+    assert with_discount.chroma[7] < without.chroma[7]           # less G
+    assert int(np.argmax(with_discount.chroma)) == 0              # C stays on top
+
+
 def test_white_noise_has_no_clear_key():
     r = run(np.random.RandomState(0).randn(5 * SR) * 0.1)
     assert not r.clear and r.key is None

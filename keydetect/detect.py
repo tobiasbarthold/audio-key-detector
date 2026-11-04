@@ -13,12 +13,17 @@ Pipeline
 4. Chroma: peaks are mapped to pitch classes after subtracting the tuning
    offset, weighted by magnitude (compressed), a low-mid register window
    (centred near G3, so rumble and hiss count little) and closeness to the
-   semitone centre. Frames are normalised so loud transients do not dominate.
+   semitone centre. A peak that is probably the 3rd, 5th or 7th harmonic of a
+   lower, louder partial (the lower partial is present in the same frame) is
+   down-weighted, which reduces fifth / third errors on bass-heavy material.
+   Frames are normalised so loud transients do not dominate.
 5. The averaged chroma is correlated (Pearson) with 24 rotated key profiles
-   from two profile sets - Krumhansl-Kessler and Temperley - and the two
-   correlation vectors are averaged. KK is the classic, but is known to favour
-   major and the dominant; Temperley is flatter for pop/electronic harmony.
-   Averaging reduces the bias of either one.
+   from four profile sets - Krumhansl-Kessler, Temperley, and two profiles
+   learned from electronic dance music by Faraldo et al. (EDMA, BRAW) - and
+   the four correlation vectors are averaged. KK is the classic, but is known
+   to favour major and the dominant; Temperley is flatter for pop harmony;
+   the EDM profiles describe loop-based electronic music. Averaging reduces
+   the bias of any single set.
 6. Confidence = (best - second best correlation) / 0.15, clipped to 0..1.
    "No clear key" is reported when tonality is low (mostly noise), when there
    is hardly any pitched content, or when confidence is very low. Exact
@@ -47,6 +52,8 @@ MIN_BEST_CORR = 0.35
 REG_CENTER = 55.0          # register weight: Gaussian over MIDI pitch
 REG_SIGMA = 20.0
 MAG_EXP = 0.5              # peak magnitude compression exponent
+HARM_ORDERS = (3, 5, 7)    # peak may be this harmonic of a lower partial
+HARM_K = 3.0               # strength of the harmonic down-weighting
 
 NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MINOR_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"]
@@ -56,6 +63,13 @@ KK_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.
 KK_MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 TEMP_MAJOR = [5.0, 2.0, 3.5, 2.0, 4.5, 4.0, 2.0, 4.5, 2.0, 3.5, 1.5, 4.0]
 TEMP_MINOR = [5.0, 2.0, 3.5, 4.5, 2.0, 4.0, 2.0, 4.5, 3.5, 2.0, 1.5, 4.0]
+# Faraldo et al. (2016) EDMA and (2017) BRAW profiles, numbers as published / distributed with Essentia
+EDMA_MAJOR = [1.00, 0.29, 0.50, 0.40, 0.60, 0.56, 0.32, 0.80, 0.31, 0.45, 0.42, 0.39]
+EDMA_MINOR = [1.00, 0.31, 0.44, 0.58, 0.33, 0.49, 0.29, 0.78, 0.43, 0.29, 0.53, 0.32]
+BRAW_MAJOR = [1.0000, 0.1573, 0.4200, 0.1570, 0.5296, 0.3669, 0.1632, 0.7711, 0.1676, 0.3827, 0.2113, 0.2965]
+BRAW_MINOR = [1.0000, 0.2330, 0.3615, 0.3905, 0.2925, 0.3777, 0.1961, 0.7425, 0.2701, 0.2161, 0.4228, 0.2272]
+PROFILE_SETS = [(KK_MAJOR, KK_MINOR), (TEMP_MAJOR, TEMP_MINOR),
+                (EDMA_MAJOR, EDMA_MINOR), (BRAW_MAJOR, BRAW_MINOR)]
 
 
 def key_name(pc: int, minor: bool) -> str:
@@ -69,9 +83,9 @@ def camelot(pc: int, minor: bool) -> str:
 
 
 def _profile_matrix() -> np.ndarray:
-    """(2, 24, 12): profile sets x keys (12 major then 12 minor) x pitch classes."""
-    out = np.zeros((2, 24, 12))
-    for s, (maj, mnr) in enumerate([(KK_MAJOR, KK_MINOR), (TEMP_MAJOR, TEMP_MINOR)]):
+    """(4, 24, 12): profile sets x keys (12 major then 12 minor) x pitch classes."""
+    out = np.zeros((len(PROFILE_SETS), 24, 12))
+    for s, (maj, mnr) in enumerate(PROFILE_SETS):
         for pc in range(12):
             out[s, pc] = np.roll(maj, pc)
             out[s, 12 + pc] = np.roll(mnr, pc)
@@ -207,13 +221,23 @@ def analyze(y: np.ndarray, sr: int = SR) -> KeyResult:
     z = np.sum(w * np.exp(phase)) / np.sum(w)
     tuning = float(np.angle(z) / (2 * np.pi) * 100.0)    # cents, -50..50
 
+    # harmonic down-weighting: a peak that is the h-th harmonic (h = 3, 5, 7) of a
+    # lower partial present in the same frame is probably not a note of its own
+    acc = np.zeros(len(pf))
+    for h in HARM_ORDERS:
+        fb = (pf / h - freqs[lo - 1]) / bin_hz
+        idx = np.clip(np.round(fb).astype(int), 1, band.shape[1] - 2)
+        sub = np.maximum(np.maximum(band[fi, idx - 1], band[fi, idx]), band[fi, idx + 1])
+        acc += np.where(fb >= 1.0, np.minimum(sub / pm, 1.0), 0.0)
+    harm = 1.0 / (1.0 + HARM_K * acc)
+
     # chroma
     midi_c = midi - tuning / 100.0
     nearest = np.round(midi_c)
     resid = midi_c - nearest
     pc = (nearest.astype(int)) % 12
     reg = np.exp(-0.5 * ((nearest - REG_CENTER) / REG_SIGMA) ** 2)
-    wt = np.power(pm, MAG_EXP) * reg * (0.5 + 0.5 * np.cos(2 * np.pi * resid))
+    wt = np.power(pm, MAG_EXP) * reg * (0.5 + 0.5 * np.cos(2 * np.pi * resid)) * harm
     frame_chroma = np.zeros((len(band), 12))
     np.add.at(frame_chroma, (fi, pc), wt)
     tot = frame_chroma.sum(axis=1, keepdims=True)
