@@ -135,3 +135,15 @@ target_link_libraries(KeyDetectorSnapshots PRIVATE
     juce::juce_audio_processors
     juce::juce_audio_formats
     juce::juce_recommended_config_flags)
+
+# ---------------------------------------------------------------- host test of the installed plugins
+juce_add_console_app(KeyDetectorHostTest PRODUCT_NAME "KeyDetectorHostTest")
+target_sources(KeyDetectorHostTest PRIVATE tests/host_test.cpp ${KD_SHARED_SOURCES})
+target_compile_definitions(KeyDetectorHostTest PRIVATE
+    ${KD_COMMON_DEFINITIONS} JUCE_PLUGINHOST_VST3=1 JUCE_PLUGINHOST_AU=1)
+target_link_libraries(KeyDetectorHostTest PRIVATE
+    kd_engine
+    "-framework CoreAudioKit"
+    juce::juce_audio_processors
+    juce::juce_audio_formats
+    juce::juce_recommended_config_flags)
