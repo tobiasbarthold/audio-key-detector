@@ -35,10 +35,11 @@ const char* const kProfile = "shaath";
 // Confidence mapping and noise gate (same values as detect.py)
 constexpr float kConfLo = 0.5f, kConfHi = 0.9f;
 constexpr int kTonalFrame = 16384;
+constexpr int kTonalHop = 4096;
 constexpr double kTonalFMin = 50.0, kTonalFMax = 5000.0;
-constexpr double kTonalPeakRatio = 10.0;
+constexpr double kTonalPeakRatio = 15.0;
 constexpr int kTonalAvgBins = 41;
-constexpr double kNoiseTonality = 0.025;
+constexpr double kNoiseTonality = 0.0027;
 constexpr float kSilencePeak = 1e-5f;
 
 // shaath profile as in Essentia's key.cpp (index 0 = tonic); used for all 24 correlations
@@ -148,7 +149,7 @@ struct KeyEngine::Impl
                                                "maxShifted", false));
         key.reset (AlgorithmFactory::create ("Key", "usePolyphony", false, "useThreeChords", false, "numHarmonics", 4,
                                               "slope", (Real) 0.6f, "profileType", kProfile, "pcpSize", 12));
-        tonalCutter.reset (AlgorithmFactory::create ("FrameCutter", "frameSize", kTonalFrame, "hopSize", kTonalFrame,
+        tonalCutter.reset (AlgorithmFactory::create ("FrameCutter", "frameSize", kTonalFrame, "hopSize", kTonalHop,
                                                       "startFromZero", true));
         tonalWindow.reset (AlgorithmFactory::create ("Windowing", "size", kTonalFrame, "type", "hann"));
         tonalSpectrum.reset (AlgorithmFactory::create ("Spectrum", "size", kTonalFrame));

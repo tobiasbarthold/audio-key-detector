@@ -38,13 +38,14 @@ DEFAULT_PROFILE = "shaath"
 CONF_LO = 0.5
 CONF_HI = 0.9
 # "No clear key" gate (see docs/ALGORITHM.md): tonality = share of the 50 Hz - 5 kHz energy
-# that sits in clear spectral peaks (16384-sample frames, peak > 10x local average power)
+# that sits in clear spectral peaks (16384-sample frames, peak > 15x local average power)
 TONAL_FRAME = 16384
+TONAL_HOP = 4096
 TONAL_FMIN = 50.0
 TONAL_FMAX = 5000.0
-TONAL_PEAK_RATIO = 10.0
+TONAL_PEAK_RATIO = 15.0
 TONAL_AVG_BINS = 41
-NOISE_TONALITY = 0.025     # below: "mostly noise"
+NOISE_TONALITY = 0.0027    # below: "mostly noise"
 SILENCE_PEAK = 1e-5        # max |sample| below: "silence"
 
 NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
@@ -159,7 +160,7 @@ def tonality(y: np.ndarray, sr: int = SR) -> float:
     lo = int(np.searchsorted(k, TONAL_FMIN))
     hi = int(np.searchsorted(k, TONAL_FMAX))
     energies, peaks = [], []
-    for frame in _frames(y, TONAL_FRAME, TONAL_FRAME, start_from_zero=True):
+    for frame in _frames(y, TONAL_FRAME, TONAL_HOP, start_from_zero=True):
         mag = ch.tonal_spectrum(ch.tonal_window(frame))
         p = mag[lo - 1:hi + 1].astype(np.float64) ** 2            # one guard bin each side
         local = _moving_average(p, TONAL_AVG_BINS) + 1e-20

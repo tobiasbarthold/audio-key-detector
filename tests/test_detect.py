@@ -92,9 +92,10 @@ def test_bandpassed_noise_has_no_clear_key():
     assert not r.clear and r.reason == "mostly noise"
 
 
-def test_pitched_material_has_high_tonality():
-    assert run(note(57, 3.0)).tonality > 0.3
-    assert run(progression(0, False)).tonality > 0.3
+def test_pitched_material_is_far_above_the_noise_gate():
+    from keydetect.detect import NOISE_TONALITY
+    assert run(note(57, 3.0)).tonality > 30 * NOISE_TONALITY
+    assert run(progression(0, False)).tonality > 30 * NOISE_TONALITY
 
 
 def test_silence():
