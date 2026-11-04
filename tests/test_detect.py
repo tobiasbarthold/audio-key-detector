@@ -10,7 +10,7 @@ import soundfile as sf
 from scipy.signal import butter, sosfilt
 
 from keydetect.cli import collect_files, main
-from keydetect.detect import (SR as ANALYSIS_SR, _ESS_PC, analyze, camelot, confidence_from_strength,
+from keydetect.detect import (HOP_SIZE, SR as ANALYSIS_SR, _ESS_PC, analyze, camelot, confidence_from_strength,
                               detect_key, key_name)
 
 from synth import SR, note, progression, scale
@@ -57,7 +57,7 @@ def test_same_result_as_essentia_key_extractor(pc, minor):
     y = np.asarray(progression(pc, minor, cents=12), dtype=np.float32)
     y = y + np.float32(0.01) * np.random.RandomState(pc).randn(len(y)).astype(np.float32)
     for profile in ("shaath", "edma", "bgate"):
-        key, scale_, strength = es.KeyExtractor(profileType=profile)(y)
+        key, scale_, strength = es.KeyExtractor(profileType=profile, hopSize=HOP_SIZE)(y)
         r = analyze(y, ANALYSIS_SR, profile)
         assert r.best_guess == key_name(_ESS_PC[key], scale_ == "minor")
         assert r.strength == pytest.approx(float(strength), abs=1e-5)

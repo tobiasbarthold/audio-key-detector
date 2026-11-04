@@ -22,9 +22,9 @@ using essentia::Real;
 using essentia::standard::Algorithm;
 using essentia::standard::AlgorithmFactory;
 
-// Essentia KeyExtractor defaults
+// Essentia KeyExtractor defaults, except the hop size (default 4096; see docs/ALGORITHM.md)
 constexpr int kFrameSize = 4096;
-constexpr int kHopSize = 4096;
+constexpr int kHopSize = 1024;
 constexpr Real kMinFreq = 25.0f;
 constexpr Real kMaxFreq = 3500.0f;
 constexpr int kMaxPeaks = 60;

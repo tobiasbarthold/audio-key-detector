@@ -117,3 +117,21 @@ target_link_libraries(KeyDetectorLiveTest PRIVATE
     juce::juce_audio_formats
     juce::juce_events
     juce::juce_recommended_config_flags)
+
+# ---------------------------------------------------------------- UI snapshots (not installed)
+juce_add_console_app(KeyDetectorSnapshots PRODUCT_NAME "KeyDetectorSnapshots")
+target_sources(KeyDetectorSnapshots PRIVATE
+    tests/snapshot.cpp
+    Source/App/MainComponent.cpp
+    Source/Plugin/PluginProcessor.cpp
+    Source/Plugin/PluginEditor.cpp
+    Source/Plugin/LiveAnalyzer.cpp
+    ${KD_SHARED_SOURCES})
+target_compile_definitions(KeyDetectorSnapshots PRIVATE
+    ${KD_COMMON_DEFINITIONS} JucePlugin_Name="Key Detector" JUCE_MODAL_LOOPS_PERMITTED=1)
+target_link_libraries(KeyDetectorSnapshots PRIVATE
+    kd_engine
+    juce::juce_gui_extra
+    juce::juce_audio_processors
+    juce::juce_audio_formats
+    juce::juce_recommended_config_flags)

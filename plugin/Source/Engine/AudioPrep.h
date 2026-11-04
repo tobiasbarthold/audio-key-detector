@@ -12,25 +12,33 @@
 namespace kd
 {
 
-// Streaming resampler from an arbitrary rate to kSampleRate (windowed sinc; plain copy at 44.1 kHz).
+// Streaming resampler from an arbitrary rate to kSampleRate. For integer rates it computes
+// exactly what scipy.signal.resample_poly does in the Python version (polyphase FIR, Kaiser
+// window beta 5, 20 * max(up, down) + 1 taps); at 44.1 kHz it copies.
 class Resampler
 {
 public:
     explicit Resampler (double rate = 44100.0) { setSourceRate (rate); }
 
-    void setSourceRate (double sourceRate);
+    void setSourceRate (double rate);
     double getSourceRate() const noexcept { return sourceRate; }
     void reset();
 
     // Appends the resampled output of `numSamples` input samples to `out`.
     void process (const float* input, int numSamples, std::vector<float>& out);
-    // Pushes zeros through the filter so the last input samples come out (end of a file).
+    // End of a file: treats the input after the last sample as zeros and appends the remaining
+    // output, so that the total output length is ceil(numInputSamples * up / down).
     void flush (std::vector<float>& out);
 
 private:
-    double sourceRate = 44100.0, ratio = 1.0;
-    juce::WindowedSincInterpolator interpolator;
-    std::vector<float> pending;
+    void produce (std::vector<float>& out, long long available);
+
+    double sourceRate = 44100.0;
+    bool bypass = true;
+    long long up = 1, down = 1, preRemove = 0;
+    std::vector<double> filter;     // zero-padded at the front like scipy's resample_poly
+    std::vector<float> buffer;      // input samples from index bufferStart on
+    long long bufferStart = 0, inputCount = 0, outputCount = 0;
 };
 
 struct LoadedAudio

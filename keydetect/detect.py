@@ -1,7 +1,7 @@
 """Key detection with Essentia's KeyExtractor (HPCP + key profiles).
 
-The pipeline is exactly the one of Essentia's ``KeyExtractor`` with default settings
-(FrameCutter 4096/4096, Hann window, Spectrum, SpectralPeaks, SpectralWhitening, HPCP, Key);
+The pipeline is exactly the one of Essentia's ``KeyExtractor`` with default settings except
+hopSize=1024 (FrameCutter 4096/1024, Hann window, Spectrum, SpectralPeaks, SpectralWhitening, HPCP, Key);
 it is run step by step in Essentia's standard mode so the averaged HPCP is available. From it
 all 24 key correlations are computed (same formula as Essentia's ``Key``), which gives the
 second-best key. The key and strength themselves come from Essentia's ``Key`` algorithm.
@@ -23,9 +23,9 @@ import essentia.standard as es  # noqa: E402
 
 from .audio import load_audio  # noqa: E402
 
-SR = 44100                 # Essentia's KeyExtractor defaults
+SR = 44100                 # Essentia's KeyExtractor defaults, except the hop size
 FRAME_SIZE = 4096
-HOP_SIZE = 4096
+HOP_SIZE = 1024            # KeyExtractor default 4096; 1024 is less sensitive to frame alignment
 MIN_FREQ = 25.0
 MAX_FREQ = 3500.0
 MAX_PEAKS = 60
@@ -48,7 +48,7 @@ TONAL_AVG_BINS = 41
 NOISE_TONALITY = 0.0027    # below: "mostly noise"
 SILENCE_PEAK = 1e-5        # max |sample| below: "silence"
 
-NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MINOR_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"]
 # Essentia's key names -> pitch class (Essentia's HPCP bin 0 is A, reference 440 Hz)
 _ESS_PC = {"A": 9, "Bb": 10, "B": 11, "C": 0, "C#": 1, "D": 2, "Eb": 3, "E": 4, "F": 5,

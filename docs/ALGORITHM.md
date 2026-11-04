@@ -14,18 +14,19 @@ modification.
 
 ## 1. Input
 
-1. Decode, mix to mono (average of the channels), resample to **44.1 kHz** (Python: `soundfile`
-   + `scipy.signal.resample_poly`; C++: JUCE readers + windowed-sinc interpolation; the plugin
-   resamples the incoming track audio the same way).
+1. Decode, mix to mono (average of the channels), resample to **44.1 kHz** with a polyphase FIR
+   filter: Python uses `scipy.signal.resample_poly` (Kaiser window, beta 5), C++
+   (`plugin/Source/Engine/AudioPrep.cpp`) builds the same filter and produces the same samples
+   (max. difference 1e-8), also in streaming form for the plugin.
 2. Files longer than 240 s: only the middle 240 s are analysed. The plugin analyses the last
    60 s it has heard.
 3. If `max |sample| < 1e-5`: **"silence"**, no key.
 
-## 2. Key: Essentia KeyExtractor (default parameters)
+## 2. Key: Essentia KeyExtractor (default parameters, hop size 1024)
 
 | step | Essentia algorithm | parameters |
 |------|--------------------|------------|
-| frames | `FrameCutter` | frameSize 4096, hopSize 4096, first frame centred on sample 0 |
+| frames | `FrameCutter` | frameSize 4096, **hopSize 1024** (KeyExtractor default: 4096), first frame centred on sample 0 |
 | window | `Windowing` | Hann (Essentia's normalised, zero-phase) |
 | spectrum | `Spectrum` | magnitude, 4096-point FFT |
 | peaks | `SpectralPeaks` | 60 peaks, by magnitude, threshold 1e-4, 25-3500 Hz |
@@ -34,12 +35,20 @@ modification.
 | average | | mean HPCP over all frames, normalised to max 1, bins < 0.2 set to 0 |
 | key | `Key` | profile **shaath**, no polyphony, 12 bins |
 
-This is exactly what `essentia.standard.KeyExtractor(profileType="shaath")` returns (the test
+This is exactly what `essentia.standard.KeyExtractor(profileType="shaath", hopSize=1024)` returns (the test
 `test_same_result_as_essentia_key_extractor` compares key, scale and strength). It is run step by
 step only so the averaged HPCP is available for the extras below. The one deliberate difference:
 we use the standard-mode `FrameCutter`, which keeps silent frames as they are, while the streaming
 `KeyExtractor` adds -100 dB random noise to silent frames; this only matters for digital silence
 inside a file.
+
+Why hop 1024 instead of the default 4096: with frames that do not overlap, the result depends on
+where the frames fall. That matters for the plugin, which hears a clip looped and from an
+arbitrary start. Measured on the evaluation files below, each also analysed looped to 8, 12, 20
+and 30 s with different start offsets: the key stayed the same in all variants for 32/35 loops
+and 43/48 stabs with hop 4096, and for 33/35 and 47/48 with hop 1024. Accuracy is unchanged
+(loops 24/35 exact with both; stabs 29/48 exact with both). Cost: 4x more frames, still well under
+0.1 s for a minute of audio.
 
 `Key` correlates the averaged HPCP with the 24 rotations of a major and a minor key profile
 (Pearson correlation) and returns the best one; its **strength** is that correlation.
@@ -110,21 +119,25 @@ name states a key with a mode, an extra holdout set. All numbers include the noi
 | engine / profile | loops exact | loops incl. relative | stabs exact | stabs incl. relative |
 |------------------|-------------|----------------------|-------------|----------------------|
 | own algorithm (v0.1) | 18/35 (51 %) | 20/35 (57 %) | 27/48 (56 %) | 33/48 (69 %) |
-| Essentia, **shaath** (default) | **24/35 (69 %)** | **26/35 (74 %)** | 29/48 (60 %) | 29/48 (60 %) |
-| Essentia, edma | 23/35 (66 %) | 26/35 (74 %) | 30/48 (62 %) | 31/48 (65 %) |
-| Essentia, bgate (Essentia's default) | 22/35 (63 %) | 25/35 (71 %) | 27/48 (56 %) | 32/48 (67 %) |
+| Essentia, **shaath** (default) | **24/35 (69 %)** | **26/35 (74 %)** | 29/48 (60 %) | 30/48 (62 %) |
+| Essentia, edma | 24/35 (69 %) | 26/35 (74 %) | 31/48 (65 %) | 33/48 (69 %) |
+| Essentia, bgate (Essentia's default) | 22/35 (63 %) | 25/35 (71 %) | 29/48 (60 %) | 34/48 (71 %) |
 
 Per half of the loops (shaath): tuning half 10/18 exact, 12/18 incl. relative; holdout half 14/17
 and 14/17. The own algorithm had 9/18, 11/18 and 9/17, 9/17.
 
-Combinations were checked before choosing (without the noise gate, so the stab numbers are up to
-two files higher than above): taking the result with the higher strength of shaath and edma gives
+The profile was chosen with KeyExtractor's default hop size 4096 (the numbers in the task
+description: shaath 24/35 and 26/35, edma 23/35 and 26/35, bgate 22/35 and 25/35 on the loops).
+Combinations were checked at that point (hop 4096, without the noise gate, so the stab numbers are
+up to two files higher than above): taking the result with the higher strength of shaath and edma gives
 24/35 and 26/35 on the loops (same as shaath) and 32/48 / 32/48 on the stabs (shaath alone: 31/48
 / 31/48); a majority vote of shaath, edma and bgate gives 23/35 / 26/35 and 32/48 / 33/48;
 averaging the correlations of two or three profiles gives at most 24/35 / 26/35. None of them is
 better than shaath alone by more than one or two files, which is within the noise of 35 + 48
 files, so the simpler single profile is used. shaath was picked over edma because it is better on
-the main loop set and both are equal including the relative key. Other profiles can be selected
+the main loop set and both are equal including the relative key. With hop 1024 edma ties
+shaath on the loops and is one or two files better on the stabs; that is within noise, so the
+choice was not revisited after the fact. Other profiles can be selected
 in the CLI with `--profile` (shaath, edma, bgate).
 
 Notes on the numbers: names in sample packs give the producer's root note, not always the
@@ -140,12 +153,13 @@ background thread. The displayed key is therefore the key of the last up to 60 s
 went through the track. "Reset" clears the collected audio (optionally also whenever the host
 transport starts). Before 2 s of non-silent audio have been collected it shows "listening...".
 
-A looping clip is not exactly the same input as the single file: the 4096-sample analysis
-frames fall on different positions of the loop. In close cases the result can differ from the
-file analysis; on the checked loops this happened once (`Reptile F 130 bpm`: F minor as a file,
-F major when looped; the second-best key shows the other one). `plugin/tests/live_test.cpp`
-feeds files through the plugin's analyzer the way a host does and compares with the offline
-analysis of the same looped audio.
+A looping clip is not exactly the same input as the single file: the analysis frames fall on
+different positions of the loop. In close major/minor or tonic/dominant cases the result can
+therefore differ from the file analysis (see the hop size note in section 2; with hop 1024 this
+happened for 2 of 35 loops and 1 of 48 stabs in the looping test). `plugin/tests/live_test.cpp`
+feeds files through the plugin's analyzer the way a host does (blocks of 512 samples at the file's
+own rate, looped to about 20 s) and compares with the offline analysis of the same looped audio;
+all checked files agree.
 
 ## 7. Reference vectors
 
@@ -153,4 +167,7 @@ analysis of the same looped audio.
 `scripts/make_test_vectors.py`; `tests/vectors/expected.json` holds the Python output for each
 (`key`, `camelot`, `second_key`, `confidence`, `strength`, `tonality`, `clear`, `reason`,
 `best_guess`, the 12 `hpcp` bins C..B and the 24 `correlations`). The C++ engine is checked against
-the same file by `plugin/tests/compare_vectors.py`.
+the same file by `plugin/tests/compare_vectors.py`, which can also compare both implementations
+directly on any folder: on all 502 files of the Core Library's `Samples/Loops`, `One Shots/Stab`,
+`One Shots/Instrument` and `One Shots/FX` (44.1 and 48 kHz) key, second key, best guess and
+"no clear key" decision are identical and confidence/strength/tonality differ by less than 0.01.

@@ -41,7 +41,7 @@ def expected(name):
 
 def parse(key):
     tonic, mode = key.split()
-    return {"C": 0, "C#": 1, "D": 2, "Eb": 3, "E": 4, "F": 5, "F#": 6, "G": 7, "Ab": 8, "G#": 8,
+    return {"C": 0, "C#": 1, "Db": 1, "D": 2, "Eb": 3, "E": 4, "F": 5, "F#": 6, "G": 7, "Ab": 8, "G#": 8,
             "A": 9, "Bb": 10, "B": 11}[tonic], mode == "minor"
 
 

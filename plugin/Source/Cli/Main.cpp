@@ -12,8 +12,15 @@
 int main (int argc, char* argv[])
 {
     juce::StringArray args;
+    juce::File dumpDir;   // --dump-audio DIR: write the 44.1 kHz mono input as raw float32 (debugging)
     for (int i = 1; i < argc; ++i)
-        args.add (juce::String::fromUTF8 (argv[i]));
+    {
+        juce::String a = juce::String::fromUTF8 (argv[i]);
+        if (a == "--dump-audio" && i + 1 < argc)
+            dumpDir = juce::File (juce::String::fromUTF8 (argv[++i]));
+        else
+            args.add (a);
+    }
     if (args.isEmpty())
     {
         std::fprintf (stderr, "usage: keydetect-cpp <files or folders...>\n");
@@ -36,6 +43,12 @@ int main (int argc, char* argv[])
         }
         else
         {
+            if (dumpDir != juce::File())
+            {
+                dumpDir.createDirectory();
+                dumpDir.getChildFile (f.getFileNameWithoutExtension() + ".f32")
+                    .replaceWithData (audio.samples.data(), audio.samples.size() * sizeof (float));
+            }
             auto r = engine.analyze (audio.samples.data(), audio.samples.size());
             auto str = [] (const std::string& s) { return s.empty() ? juce::var() : juce::var (juce::String (s)); };
             obj->setProperty ("clear", r.clear);

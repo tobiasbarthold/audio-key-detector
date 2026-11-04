@@ -3,47 +3,137 @@
 #include "AudioPrep.h"
 #include "KeyEngine.h"
 
+#include <numeric>
+
 namespace kd
 {
+
+namespace
+{
+double besselI0 (double x)
+{
+    double sum = 1.0, term = 1.0;
+    for (int k = 1; k < 200; ++k)
+    {
+        term *= (x / (2.0 * k)) * (x / (2.0 * k));
+        sum += term;
+        if (term < sum * 1e-17)
+            break;
+    }
+    return sum;
+}
+
+// scipy.signal.firwin (numTaps, cutoff, window=("kaiser", beta)), cutoff relative to Nyquist
+std::vector<double> firwinKaiser (int numTaps, double cutoff, double beta)
+{
+    std::vector<double> h ((size_t) numTaps);
+    const double alpha = 0.5 * (numTaps - 1);
+    double sum = 0.0;
+    for (int n = 0; n < numTaps; ++n)
+    {
+        const double m = n - alpha;
+        const double x = cutoff * m;
+        const double sinc = x == 0.0 ? 1.0 : std::sin (juce::MathConstants<double>::pi * x) / (juce::MathConstants<double>::pi * x);
+        const double r = (n - alpha) / alpha;
+        const double w = besselI0 (beta * std::sqrt (std::max (0.0, 1.0 - r * r))) / besselI0 (beta);
+        h[(size_t) n] = cutoff * sinc * w;
+        sum += h[(size_t) n];
+    }
+    for (auto& v : h)
+        v /= sum;
+    return h;
+}
+} // namespace
 
 void Resampler::setSourceRate (double rate)
 {
     sourceRate = rate > 0.0 ? rate : kSampleRate;
-    ratio = sourceRate / kSampleRate;
+    auto in = (long long) std::llround (sourceRate);
+    const auto outRate = (long long) kSampleRate;
+    if (std::max (outRate, in) / std::gcd (in, outRate) > 4000)
+        in = std::max (100LL, (in + 50) / 100 * 100);   // unusual rate: round to 100 Hz (< 2 cents)
+    const auto g = std::gcd (in, outRate);
+    up = outRate / g;
+    down = in / g;
+    bypass = up == down;
+    filter.clear();
+    if (! bypass)
+    {
+        // same construction as scipy.signal.resample_poly (window=("kaiser", 5.0))
+        const long long maxRate = std::max (up, down);
+        const long long halfLen = 10 * maxRate;
+        auto h = firwinKaiser ((int) (2 * halfLen + 1), 1.0 / (double) maxRate, 5.0);
+        const long long prePad = down - halfLen % down;
+        preRemove = (halfLen + prePad) / down;
+        filter.assign ((size_t) prePad, 0.0);
+        for (auto v : h)
+            filter.push_back (v * (double) up);
+    }
     reset();
 }
 
 void Resampler::reset()
 {
-    interpolator.reset();
-    pending.clear();
+    buffer.clear();
+    bufferStart = inputCount = outputCount = 0;
+}
+
+void Resampler::produce (std::vector<float>& out, long long available)
+{
+    const auto len = (long long) filter.size();
+    for (;;)
+    {
+        const long long t = (outputCount + preRemove) * down;     // position on the upsampled grid
+        const long long jMax = t / up;
+        if (jMax >= available)
+            break;
+        const long long jMin = std::max (0LL, (t - (len - 1) + up - 1) / up);
+        double acc = 0.0;
+        for (long long j = jMin; j <= jMax; ++j)
+        {
+            const long long k = j - bufferStart;
+            if (k >= 0 && k < (long long) buffer.size())
+                acc += (double) buffer[(size_t) k] * filter[(size_t) (t - j * up)];
+        }
+        out.push_back ((float) acc);
+        ++outputCount;
+    }
+    // drop input that no future output needs
+    const long long tNext = (outputCount + preRemove) * down;
+    const long long keepFrom = std::max (0LL, (tNext - (len - 1) + up - 1) / up);
+    if (keepFrom > bufferStart)
+    {
+        const auto drop = (size_t) std::min ((long long) buffer.size(), keepFrom - bufferStart);
+        buffer.erase (buffer.begin(), buffer.begin() + (long) drop);
+        bufferStart += (long long) drop;
+    }
 }
 
 void Resampler::process (const float* input, int numSamples, std::vector<float>& out)
 {
     if (numSamples <= 0)
         return;
-    if (std::abs (ratio - 1.0) < 1e-9)
+    if (bypass)
     {
         out.insert (out.end(), input, input + numSamples);
         return;
     }
-    pending.insert (pending.end(), input, input + numSamples);
-    const int numOut = (int) (((double) pending.size() - 4.0) / ratio);
-    if (numOut <= 0)
-        return;
-    const auto old = out.size();
-    out.resize (old + (size_t) numOut);
-    const int used = interpolator.process (ratio, pending.data(), out.data() + old, numOut);
-    pending.erase (pending.begin(), pending.begin() + juce::jlimit (0, (int) pending.size(), used));
+    buffer.insert (buffer.end(), input, input + numSamples);
+    inputCount += numSamples;
+    produce (out, inputCount);
 }
 
 void Resampler::flush (std::vector<float>& out)
 {
-    if (std::abs (ratio - 1.0) < 1e-9)
+    if (bypass)
         return;
-    std::vector<float> zeros ((size_t) (juce::WindowedSincInterpolator::getBaseLatency() * 2 + 8), 0.0f);
-    process (zeros.data(), (int) zeros.size(), out);
+    const long long total = (inputCount * up + down - 1) / down;   // scipy's output length
+    const long long zeros = (long long) filter.size() / up + 2;
+    buffer.insert (buffer.end(), (size_t) zeros, 0.0f);
+    produce (out, inputCount + zeros);
+    if (outputCount > total)
+        out.resize (out.size() - (size_t) (outputCount - total));
+    inputCount += zeros;
 }
 
 LoadedAudio loadAudioFile (const juce::File& file, juce::AudioFormatManager& formats)
@@ -98,14 +188,7 @@ LoadedAudio loadAudioFile (const juce::File& file, juce::AudioFormatManager& for
         }
         resampler.process (mono.data(), n, result.samples);
     }
-    if (std::abs (sr - kSampleRate) > 1e-6)
-    {
-        // drop the interpolator's delay at the start, then flush the tail
-        resampler.flush (result.samples);
-        const auto delay = (size_t) std::lround (juce::WindowedSincInterpolator::getBaseLatency() / (sr / kSampleRate));
-        result.samples.erase (result.samples.begin(), result.samples.begin() + (long) std::min (delay, result.samples.size()));
-        result.samples.resize ((size_t) std::llround (expectedOut), 0.0f);
-    }
+    resampler.flush (result.samples);
     for (auto& s : result.samples)
         if (! std::isfinite (s))
             s = 0.0f;
