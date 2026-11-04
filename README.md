@@ -1,6 +1,6 @@
 # audio-key-detector
 
-> **Work in progress.** Accuracy is still being improved (current check against 35 named loops: 37 % exact, 49 % incl. relative major/minor), and a VST3/AU plugin with a drag-and-drop app is in development.
+> **Work in progress.** Accuracy is still being improved (current check against 35 named loops: 51 % exact, 57 % incl. relative major/minor; the aim is higher), and a VST3/AU plugin with a drag-and-drop app is in development.
 
 A small, fast command line tool that detects the musical key of audio samples and loops.
 Built for producers: drop in a folder of samples, get key, Camelot code, confidence and tuning.
@@ -54,10 +54,13 @@ Short version (the full, exact specification is in [docs/ALGORITHM.md](docs/ALGO
 3. Estimate the tuning of the whole file from how far the peaks sit from the 12-tone grid and
    compensate it before folding to 12 pitch classes (so a sample detuned by +30 cents still
    lands on the right notes).
-4. Fold the peaks into a chroma vector, weighted towards the low-mid register.
-5. Correlate the chroma with 24 key profiles. Two profile sets are used - Krumhansl-Kessler
-   and Temperley - and their correlations are averaged, which reduces the known bias of
-   either one (KK tends to major and the dominant, Temperley is flatter).
+4. Fold the peaks into a chroma vector, weighted towards the low-mid register. A peak that is
+   probably the 3rd, 5th or 7th harmonic of a lower partial present in the same frame is
+   down-weighted (fewer fifth errors on bass-heavy material).
+5. Correlate the chroma with 24 key profiles. Four profile sets are used - Krumhansl-Kessler,
+   Temperley, and the two electronic-dance-music profiles EDMA and BRAW by Faraldo et al. - and
+   their correlations are averaged, which reduces the known bias of any single set (KK tends to
+   major and the dominant, Temperley is flatter, the EDM profiles favour minor).
 6. Confidence is the margin between the best and second-best key, scaled to 0..1.
 7. Mostly noisy or atonal material is reported as "no clear key" together with the strongest
    spectral region, instead of a fake key.
@@ -65,10 +68,27 @@ Short version (the full, exact specification is in [docs/ALGORITHM.md](docs/ALGO
 ## Accuracy and limits
 
 Honest numbers: on the 35 factory loops of Ableton Live 12 Suite whose file names state a key
-(`Loops/`), the detected key matches the name in 13 cases (37 %), another 4 are the relative
-major/minor (49 % with those), and 18 are wrong or "no clear key". Names in loop packs are the
-producer's root note, not always the harmonic key, so treat the number as a rough guide. Full
-table: run `python scripts/eval_named_loops.py <folder>` on your own library.
+(`Loops/`), the detected key matches the name in 18 cases (51 %), another 2 are the relative
+major/minor (57 % with those), and 15 are wrong or "no clear key". Before the latest changes
+this was 13 (37 %) and 17 (49 %). The files were split by name into a tuning half (parameters were
+chosen by the tuning half; the holdout numbers were looked at while exploring and are only an
+approximate check, not a blind test) and a holdout half; results per half:
+
+| set | files | exact | incl. relative |
+|-----|-------|-------|----------------|
+| tuning half (before) | 18 | 6 (33 %) | 9 (50 %) |
+| tuning half (now) | 18 | 9 (50 %) | 11 (61 %) |
+| holdout half (before) | 17 | 7 (41 %) | 8 (47 %) |
+| holdout half (now) | 17 | 9 (53 %) | 9 (53 %) |
+| all (before) | 35 | 13 (37 %) | 17 (49 %) |
+| all (now) | 35 | 18 (51 %) | 20 (57 %) |
+| chord stabs / one-shots with a named key, second holdout (before) | 48 | 24 (50 %) | 30 (62 %) |
+| chord stabs / one-shots with a named key, second holdout (now) | 48 | 27 (56 %) | 33 (69 %) |
+
+Names in loop packs are the producer's root note, not always the harmonic key, so treat the numbers
+as a rough guide (several remaining misses are loops whose pads or bass play a different key than the
+name). Reproduce with `python scripts/eval_named_loops.py <Loops folder> --extra <folder>`; ideas
+that were tried without gain are listed in docs/ALGORITHM.md section 14.
 
 * **Relative major/minor** (e.g. A minor vs C major) share the same notes and are the most common
   confusion; the second-best key is printed for exactly this reason.

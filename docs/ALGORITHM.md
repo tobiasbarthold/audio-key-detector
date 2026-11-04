@@ -78,14 +78,31 @@ tuning = angle(z) / (2*pi) * 100                     # cents, in (-50, +50]
 
 Positive = the music is sharp of A440.
 
-## 8. Chroma
+## 8. Harmonic down-weighting, chroma
 
-For every peak: `midi_c = midi - tuning/100`, `nearest = round(midi_c)`, `resid = midi_c - nearest`,
+**Harmonic down-weighting.** Constants `HARM_ORDERS = (3, 5, 7)`, `HARM_K = 3`. For every peak
+(frame `t`, band index `j`, frequency `f`, magnitude `m`) and every `h` in `HARM_ORDERS`:
+
+```
+fb  = (f/h - f_{lo-1}) / 2.6917                  # fractional band index of f/h (bin width = 22050/8192)
+idx = clip(round(fb), 1, nband-2)                # nband = 1841; round half to even as numpy.round
+sub = max(band[t, idx-1], band[t, idx], band[t, idx+1])    # magnitudes (not power) of the band array, section 3
+r_h = min(sub / m, 1)   if fb >= 1 else 0
+acc = sum over h in HARM_ORDERS of r_h
+harm = 1 / (1 + HARM_K * acc)
+```
+
+A peak whose possible fundamental `f/3`, `f/5` or `f/7` is present in the same frame with at least
+comparable magnitude is probably an overtone (3rd harmonic = fifth, 5th = major third, 7th = flat
+seventh above the fundamental) and is attenuated. Octave harmonics (2, 4, 8) land on the same
+pitch class and are left alone.
+
+**Chroma.** For every peak: `midi_c = midi - tuning/100`, `nearest = round(midi_c)`, `resid = midi_c - nearest`,
 `pc = nearest mod 12` (C = 0 ... B = 11; integer modulo with a non-negative result).
 
 ```
 reg = exp(-0.5 * ((nearest - REG_CENTER) / REG_SIGMA)^2)       # REG_CENTER=55 (G3), REG_SIGMA=20
-wt  = m^MAG_EXP * reg * (0.5 + 0.5*cos(2*pi*resid))            # MAG_EXP=0.5
+wt  = m^MAG_EXP * reg * (0.5 + 0.5*cos(2*pi*resid)) * harm     # MAG_EXP=0.5
 frame_chroma[t, pc] += wt
 ```
 
@@ -96,7 +113,7 @@ frame_chroma[t, pc] += wt
 
 ## 9. Key profiles
 
-Index = pitch class relative to the key's tonic (0 = tonic). Two profile sets are used.
+Index = pitch class relative to the key's tonic (0 = tonic). Four profile sets are used.
 
 | step | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
 |------|---|---|---|---|---|---|---|---|---|---|----|----|
@@ -104,17 +121,28 @@ Index = pitch class relative to the key's tonic (0 = tonic). Two profile sets ar
 | KK minor | 6.33 | 2.68 | 3.52 | 5.38 | 2.60 | 3.53 | 2.54 | 4.75 | 3.98 | 2.69 | 3.34 | 3.17 |
 | Temperley major | 5.0 | 2.0 | 3.5 | 2.0 | 4.5 | 4.0 | 2.0 | 4.5 | 2.0 | 3.5 | 1.5 | 4.0 |
 | Temperley minor | 5.0 | 2.0 | 3.5 | 4.5 | 2.0 | 4.0 | 2.0 | 4.5 | 3.5 | 2.0 | 1.5 | 4.0 |
+| EDMA major | 1.00 | 0.29 | 0.50 | 0.40 | 0.60 | 0.56 | 0.32 | 0.80 | 0.31 | 0.45 | 0.42 | 0.39 |
+| EDMA minor | 1.00 | 0.31 | 0.44 | 0.58 | 0.33 | 0.49 | 0.29 | 0.78 | 0.43 | 0.29 | 0.53 | 0.32 |
+| BRAW major | 1.0000 | 0.1573 | 0.4200 | 0.1570 | 0.5296 | 0.3669 | 0.1632 | 0.7711 | 0.1676 | 0.3827 | 0.2113 | 0.2965 |
+| BRAW minor | 1.0000 | 0.2330 | 0.3615 | 0.3905 | 0.2925 | 0.3777 | 0.1961 | 0.7425 | 0.2701 | 0.2161 | 0.4228 | 0.2272 |
 
 KK = Krumhansl-Kessler (1982) probe-tone profiles; Temperley = Temperley (2001, Kostka-Payne
-based). Key `tonic` is the profile rotated so that `profile_key[(tonic + step) mod 12] = profile[step]`
-(`numpy.roll(profile, tonic)`). Each of the 4 x 12 rotated vectors is mean-subtracted and scaled to
-unit L2 norm.
+based). EDMA and BRAW are key profiles learned from electronic dance music corpora: Á. Faraldo,
+E. Gómez, S. Jordà, P. Herrera, "Key Estimation in Electronic Dance Music", ECIR 2016, pp. 335-347
+(EDMA), and Á. Faraldo, S. Jordà, P. Herrera, "A Multi-Profile Method for Key Estimation in EDM",
+AES Semantic Audio Conference 2017 (BRAW, the median Beatport profile); the numbers are the
+published ones, as also distributed with the Essentia library (`key.cpp`, "edma" / "braw"
+profile types; the third "other" profile of that paper is not used). The profile sets are named
+`KK_*`, `TEMP_*`, `EDMA_*`, `BRAW_*` in `detect.py`, in this order. Key `tonic` is the profile rotated
+so that `profile_key[(tonic + step) mod 12] = profile[step]` (`numpy.roll(profile, tonic)`). Each
+of the 4 x 24 rotated vectors is mean-subtracted and scaled to unit L2 norm.
 
 ## 10. Correlation, confidence
 
 ```
 c    = chroma - mean(chroma);   c = c / ||c||        (if ||c|| < 1e-12: all correlations = 0)
-corr[key] = 0.5 * ( dot(KK_key, c) + dot(Temperley_key, c) )    # Pearson, averaged over the 2 sets
+corr[key] = 0.25 * ( dot(KK_key, c) + dot(Temperley_key, c)
+                   + dot(EDMA_key, c) + dot(BRAW_key, c) )      # Pearson, averaged over the 4 sets
 ```
 
 Key index 0..11 = C major .. B major, 12..23 = C minor .. B minor. `b1`, `b2` = indices of the
@@ -158,3 +186,22 @@ mainly come from the resampler and float32/float64 rounding. Noise/silence vecto
 
 Regenerate expectations after any deliberate algorithm change with
 `python scripts/make_test_vectors.py`.
+
+## 14. Evaluation and what was tried
+
+`scripts/eval_named_loops.py <Loops folder> --extra <folder> ...` compares the result with the key in
+the file name (hit: tonic and, if named, mode equal; related: relative major/minor; names without a
+mode count as hit if the tonic matches). The files are sorted by name; even positions are the
+*tuning* half (the data parameters were chosen on), odd positions the *holdout* half; chord
+stabs / chord one-shots of `One Shots/Stab` and `One Shots/Instrument` whose name states a mode
+are a second, independent holdout ("extra"). Choices were driven by the tuning half; the holdout numbers were also
+visible during exploration, so they are an approximate check, not a blind test.
+
+Tried and **not** adopted (no gain on the tuning half, or worse on holdout): sub-harmonic credit
+(HPCP style, "a peak also counts for f/2, f/3, ..."), separate bass chroma (< 150-400 Hz) added to the
+chroma or as tonic bonus, first-seconds chroma as tonic hint, segment-wise key voting, chord-root
+histograms, log-magnitude or full-spectrum (no peak picking) chroma, median/percentile floors for
+peak picking, peak persistence over frames, minor-key bias, FFT 4096 or 16384, hop 1024, a lower
+peak ratio as fallback for sparse spectra (costs noise rejection), and a lower noise threshold
+(Swell Short Noise has tonality 0.034, the same as some tonal bass loops: not separable by
+tonality, so the 0.05 gate stays).
