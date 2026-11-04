@@ -21,7 +21,8 @@ Pipeline
    Averaging reduces the bias of either one.
 6. Confidence = (best - second best correlation) / 0.15, clipped to 0..1.
    "No clear key" is reported when tonality is low (mostly noise), when there
-   is hardly any pitched content, or when confidence is very low.
+   is hardly any pitched content, or when confidence is very low. Exact
+   numbers: docs/ALGORITHM.md.
 """
 
 from dataclasses import dataclass, field, asdict
@@ -40,9 +41,12 @@ FMAX = 5000.0
 MAX_SECONDS = 240.0  # analyse the middle 4 minutes of very long files
 
 PEAK_RATIO = 10.0          # peak power vs local average power
-NOISE_TONALITY = 0.20      # below: "mostly noise"
+NOISE_TONALITY = 0.05     # below: "mostly noise"
 MIN_CONFIDENCE = 0.02      # below: "no clear key"
 MIN_BEST_CORR = 0.35
+REG_CENTER = 55.0          # register weight: Gaussian over MIDI pitch
+REG_SIGMA = 20.0
+MAG_EXP = 0.5              # peak magnitude compression exponent
 
 NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MINOR_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"]
@@ -208,8 +212,8 @@ def analyze(y: np.ndarray, sr: int = SR) -> KeyResult:
     nearest = np.round(midi_c)
     resid = midi_c - nearest
     pc = (nearest.astype(int)) % 12
-    reg = np.exp(-0.5 * ((nearest - 55.0) / 20.0) ** 2)
-    wt = np.power(pm, 0.5) * reg * (0.5 + 0.5 * np.cos(2 * np.pi * resid))
+    reg = np.exp(-0.5 * ((nearest - REG_CENTER) / REG_SIGMA) ** 2)
+    wt = np.power(pm, MAG_EXP) * reg * (0.5 + 0.5 * np.cos(2 * np.pi * resid))
     frame_chroma = np.zeros((len(band), 12))
     np.add.at(frame_chroma, (fi, pc), wt)
     tot = frame_chroma.sum(axis=1, keepdims=True)
