@@ -4,7 +4,7 @@
 
 namespace
 {
-enum Columns { colFile = 1, colKey, colCamelot, colConfidence };
+enum Columns { colFile = 1, colKey, colCamelot, colConfidence, colResonances, colFits };
 
 // One engine and format manager per worker thread.
 struct Worker
@@ -39,10 +39,12 @@ MainComponent::MainComponent()
     addAndMakeVisible (clearButton);
 
     auto& header = table.getHeader();
-    header.addColumn ("File", colFile, 300, 120, -1, juce::TableHeaderComponent::notSortable);
+    header.addColumn ("File", colFile, 200, 100, -1, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Key", colKey, 120, 80, -1, juce::TableHeaderComponent::notSortable);
     header.addColumn ("Camelot", colCamelot, 70, 60, -1, juce::TableHeaderComponent::notSortable);
-    header.addColumn ("Confidence", colConfidence, 110, 80, -1, juce::TableHeaderComponent::notSortable);
+    header.addColumn ("Confidence", colConfidence, 100, 80, -1, juce::TableHeaderComponent::notSortable);
+    header.addColumn ("Resonances", colResonances, 160, 80, -1, juce::TableHeaderComponent::notSortable);
+    header.addColumn ("Fits", colFits, 290, 80, -1, juce::TableHeaderComponent::notSortable);
     header.setStretchToFitActive (true);
     table.setRowHeight (28);
     table.setHeaderHeight (26);
@@ -55,7 +57,7 @@ MainComponent::MainComponent()
     addAndMakeVisible (status);
     updateStatus();
 
-    setSize (680, 500);
+    setSize (940, 500);
 }
 
 MainComponent::~MainComponent()
@@ -265,6 +267,16 @@ void MainComponent::paintCell (juce::Graphics& g, int rowIndex, int column, int 
                 g.fillRoundedRectangle (track.withWidth (juce::jmax (6.0f, track.getWidth() * r.confidence)), 3.0f);
             }
             break;
+        case colResonances:
+        case colFits:
+            if (row.done && row.error.isEmpty() && ! r.clear && ! r.resonances.empty())
+            {
+                g.setColour (column == colResonances ? theme::text : theme::textDim);
+                g.drawText (juce::String (juce::CharPointer_UTF8 (kd::joinWithDots (column == colResonances ? r.resonances : r.fits).c_str()))
+                                + (column == colFits && r.fitsPartial ? " (partly)" : ""),
+                            bounds, juce::Justification::centredLeft, true);
+            }
+            break;
         default:
             break;
     }
@@ -284,7 +296,12 @@ juce::String MainComponent::getCellTooltip (int rowIndex, int)
     if (r.clear)
         t << "\nsecond best: " << r.secondKey << " (" << r.secondCamelot << ")";
     else
+    {
         t << "\n" << r.reason << (r.bestGuess.empty() ? "" : "; best guess " + r.bestGuess);
+        if (! r.resonances.empty())
+            t << "\nresonances: " << juce::String (juce::CharPointer_UTF8 (kd::joinWithDots (r.resonances).c_str()))
+              << "\nfits" << (r.fitsPartial ? " (partly): " : ": ") << juce::String (juce::CharPointer_UTF8 (kd::joinWithDots (r.fits).c_str()));
+    }
     return t;
 }
 

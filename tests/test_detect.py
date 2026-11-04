@@ -9,9 +9,10 @@ import pytest
 import soundfile as sf
 from scipy.signal import butter, sosfilt
 
+from keydetect.audio import load_audio
 from keydetect.cli import collect_files, main
 from keydetect.detect import (HOP_SIZE, SR as ANALYSIS_SR, _ESS_PC, analyze, camelot, confidence_from_strength,
-                              detect_key, key_name)
+                              detect_key, fitting_keys, key_name, note_name)
 
 from synth import SR, note, progression, scale
 
@@ -190,6 +191,78 @@ def test_reference_vectors_still_match():
             assert got[k] == pytest.approx(exp[k], abs=0.002), (name, k)
 
 
+# ----- resonances and fitting keys for "no clear key" ---------------------------
+
+def test_note_names():
+    assert note_name(69) == "A4" and note_name(82) == "A#5" and note_name(60) == "C4"
+    assert note_name(94) == "A#6" and note_name(12) == "C0"
+
+
+def test_fitting_keys_all_contained():
+    fits, partial = fitting_keys([10, 11, 6])          # A#, B, F#
+    assert not partial
+    assert fits == ["B major", "F# major", "Eb minor", "G# minor"]   # tonic/fifth among them first
+    assert fitting_keys([])[0] == []
+
+
+def test_fitting_keys_partial_when_no_key_contains_all():
+    fits, partial = fitting_keys([0, 1, 2, 3])         # chromatic cluster: no 7-note scale has it
+    assert partial and 1 <= len(fits) <= 4
+    assert fitting_keys([0, 4, 7])[1] is False
+
+
+def test_resonant_noise_reports_resonances_and_fits():
+    y = _resonant_noise()
+    r = run(y)
+    assert not r.clear and r.reason == "mostly noise"
+    assert r.resonances == ["A#5", "B5", "F#6"]
+    for hz, want in zip(r.resonance_hz, (926, 980, 1491)):
+        assert hz == pytest.approx(want, abs=15)
+    assert {"B major", "F# major", "Eb minor", "G# minor"} == set(r.fits) and not r.fits_partial
+    # the same sound looped (as the plugin hears it) and started elsewhere
+    long = np.tile(y, 7)[12345:]
+    assert run(long).resonances == r.resonances
+
+
+def test_plain_noise_has_no_resonances():
+    r = run(np.random.RandomState(5).randn(4 * SR) * 0.1)
+    assert not r.clear and r.resonances == [] and r.fits == []
+    r = run(np.random.RandomState(6).randn(SR // 4) * 0.1)      # very short: few frames
+    assert r.resonances == []
+
+
+def test_tonal_results_have_no_resonances():
+    r = run(progression(9, True))
+    assert r.clear and r.resonances == [] and r.fits == [] and not r.fits_partial
+
+
+def test_cli_prints_resonances_for_no_clear_key(tmp_path, capsys):
+    sf.write(str(tmp_path / "swell.wav"), _resonant_noise(), SR)
+    sf.write(str(tmp_path / "c.wav"), progression(0, False), SR)
+    assert main([str(tmp_path / "swell.wav")]) == 0
+    out = capsys.readouterr().out
+    assert "no clear key" in out and "resonances: A#5 \u00b7 B5 \u00b7 F#6" in out
+    assert "fits: B major \u00b7 F# major \u00b7 Eb minor \u00b7 G# minor" in out
+    assert main(["--json", str(tmp_path)]) == 0
+    by = {os.path.basename(d["file"]): d for d in json.loads(capsys.readouterr().out)}
+    assert by["swell.wav"]["resonances"] == ["A#5", "B5", "F#6"]
+    assert by["swell.wav"]["fits_partial"] is False and len(by["swell.wav"]["resonance_hz"]) == 3
+    assert by["c.wav"]["resonances"] == [] and by["c.wav"]["fits"] == []
+    assert main([str(tmp_path / "c.wav")]) == 0
+    assert "resonances" not in capsys.readouterr().out
+
+
+def _resonant_noise():
+    """White noise plus three narrow resonances at 926, 980 and 1491 Hz (A#5, B5, F#6)."""
+    from scipy.signal import iirpeak, lfilter
+    wn = np.random.RandomState(2).randn(3 * SR)
+    y = wn.copy()
+    for f, g in ((926, 4.0), (980, 3.2), (1491, 2.4)):
+        b, a = iirpeak(f / (SR / 2), 100)
+        y += g * lfilter(b, a, wn)
+    return (0.5 * y / np.max(np.abs(y))).astype(np.float32)
+
+
 ABLETON_NOISE = ("/Applications/Ableton Live 12 Suite.app/Contents/App-Resources/Core Library/"
                  "Samples/One Shots/FX/Swell Short Noise.wav")
 
@@ -198,3 +271,16 @@ ABLETON_NOISE = ("/Applications/Ableton Live 12 Suite.app/Contents/App-Resources
 def test_ableton_swell_short_noise_has_no_clear_key():
     r = detect_key(ABLETON_NOISE)
     assert not r.clear and r.reason == "mostly noise"
+
+
+@pytest.mark.skipif(not os.path.exists(ABLETON_NOISE), reason="needs Ableton Live 12 Suite Core Library")
+def test_ableton_swell_short_noise_resonances_and_fits():
+    r = detect_key(ABLETON_NOISE)
+    assert r.resonances == ["A#5", "B5", "F#6"]                  # strongest first
+    for hz, want in zip(r.resonance_hz, (926, 980, 1491)):
+        assert hz == pytest.approx(want, abs=8)
+    assert "Eb minor" in r.fits and not r.fits_partial and len(r.fits) <= 4
+    # looped, as the plugin hears it
+    y, sr = load_audio(ABLETON_NOISE, ANALYSIS_SR)
+    looped = analyze(np.tile(y, 8), ANALYSIS_SR)
+    assert looped.resonances == r.resonances and looped.fits == r.fits

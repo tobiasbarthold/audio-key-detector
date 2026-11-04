@@ -73,10 +73,24 @@ void KeyDetectorEditor::paint (juce::Graphics& g)
     {
         g.setColour (textDim);
         g.setFont (font (34.0f, true));
-        g.drawText ("no clear key", inner.removeFromTop (78), juce::Justification::centred);
+        const bool extras = ! r.resonances.empty();
+        g.drawText ("no clear key", inner.removeFromTop (extras ? 56 : 78), juce::Justification::centred);
         g.setFont (font (13.0f));
         g.setColour (textFaint);
-        g.drawText (r.reason, inner.removeFromTop (22), juce::Justification::centred);
+        g.drawText (r.reason, inner.removeFromTop (extras ? 20 : 22), juce::Justification::centred);
+        if (extras)
+        {
+            // what can still be said about the sound: its strongest resonances and the keys they fit
+            const juce::String res = juce::String ("resonances: ")
+                                     + juce::String (juce::CharPointer_UTF8 (kd::joinWithDots (r.resonances).c_str()));
+            const juce::String fits = juce::String (r.fitsPartial ? "fits (partly): " : "fits: ")
+                                      + juce::String (juce::CharPointer_UTF8 (kd::joinWithDots (r.fits).c_str()));
+            g.setFont (font (13.0f, true));
+            g.setColour (textDim);
+            g.drawText (res, inner.removeFromTop (20), juce::Justification::centred, true);
+            g.setFont (font (12.5f));
+            g.drawText (fits, inner.removeFromTop (20), juce::Justification::centred, true);
+        }
     }
     else
     {

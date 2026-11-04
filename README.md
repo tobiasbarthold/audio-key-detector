@@ -30,17 +30,22 @@ for a while (or put the plugin on the master track). Works the same in FL Studio
 any other VST3/AU host.
 
 States: "listening..." (less than 2 s of non-silent audio so far), the key, or "no clear key"
-(mostly noise: drums, risers, noise sweeps).
+(mostly noise: drums, risers, noise sweeps). For "no clear key" the plugin still shows what can
+be said about the sound: its strongest **resonances** as notes (e.g. `A#5 · B5 · F#6`) and the
+major/minor keys that **fit** them (`B major · F# major · Eb minor · G# minor`), so a riser or
+swell can be tuned to the track. Nothing is shown if there is no prominent resonance.
+
+<img src="docs/images/plugin_noise.png" width="420" alt="Key Detector plugin showing no clear key with resonances A#5, B5, F#6 and fitting keys">
 
 ## Key Detector app
 
-<img src="docs/images/app.png" width="560" alt="Key Detector app with a result list">
+<img src="docs/images/app.png" width="700" alt="Key Detector app with a result list">
 
 `~/Applications/Key Detector.app`: drop audio files or whole folders on the window (or use
 **Choose files...**) and get one row per file with key, Camelot code and confidence. Folders are
 scanned recursively; wav, aiff, flac, ogg, mp3, m4a and caf are read. Hover over a row for the
-second-best key, double-click to copy "A minor (8A)". The app uses the same analysis code as the
-plugin.
+second-best key, double-click to copy "A minor (8A)". "No clear key" rows list the resonances and
+fitting keys in two extra columns. The app uses the same analysis code as the plugin.
 
 ## Install from source
 
@@ -82,6 +87,8 @@ Banjo Arpeggio E Minor 100 bpm.wav
   E minor  (9A)  confidence 0.73  |  2nd: A minor (8A)
 Swell Short Noise.wav
   no clear key  (mostly noise; best guess B major)
+  resonances: A#5 · B5 · F#6
+  fits: B major · F# major · Eb minor · G# minor
 ```
 
 ```
@@ -91,6 +98,8 @@ keydetect <files or folders...> [--json] [--profile shaath|edma|bgate]
 * Folders are scanned recursively for wav / aif / aiff / flac / mp3 / m4a / ogg.
 * Per file: key, Camelot code, confidence 0..1, second-best key. `--json` adds Essentia's raw
   `strength`, the `tonality` used for the noise gate and the reason for "no clear key".
+* For "no clear key" also the `resonances` (note names with octave, strongest first), their
+  `resonance_hz`, the `fits` (keys containing those notes) and `fits_partial`; empty otherwise.
 * MP3 and M4A are decoded through macOS `afconvert` (or `ffmpeg` if installed). Files are only
   read; nothing is written next to them.
 * Exit code 1 if any file could not be read.

@@ -10,7 +10,7 @@ The C++ plugin (plugin/Source/KeyEngine.cpp) implements the same steps with Esse
 library; see docs/ALGORITHM.md.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Dict, Optional
 
 import numpy as np
@@ -46,10 +46,21 @@ TONAL_FMAX = 5000.0
 TONAL_PEAK_RATIO = 15.0
 TONAL_AVG_BINS = 41
 NOISE_TONALITY = 0.0027    # below: "mostly noise"
+# Resonances of a "no clear key" sound (see docs/ALGORITHM.md): peaks of the time-averaged power
+# spectrum that stand out from the local average
+RES_FMIN = 80.0
+RES_AVG_BINS = 81
+RES_RATIO = 5.0            # min. peak power / local average (for >= RES_FULL_FRAMES frames)
+RES_FULL_FRAMES = 20       # fewer frames: ratio scaled by sqrt(20 / frames) (noisier average)
+RES_MAX = 3
+FITS_MAX = 4
 SILENCE_PEAK = 1e-5        # max |sample| below: "silence"
 
 NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MINOR_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "G#", "A", "Bb", "B"]
+PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]   # resonances
+MAJOR_SCALE = (0, 2, 4, 5, 7, 9, 11)
+MINOR_SCALE = (0, 2, 3, 5, 7, 8, 10)
 # Essentia's key names -> pitch class (Essentia's HPCP bin 0 is A, reference 440 Hz)
 _ESS_PC = {"A": 9, "Bb": 10, "B": 11, "C": 0, "C#": 1, "D": 2, "Eb": 3, "E": 4, "F": 5,
            "F#": 6, "G": 7, "Ab": 8, "G#": 8, "Db": 1, "D#": 3, "A#": 10, "Gb": 6}
@@ -88,6 +99,10 @@ class KeyResult:
     reason: str = ""              # why there is no clear key
     best_guess: Optional[str] = None
     profile: str = DEFAULT_PROFILE
+    resonances: list = field(default_factory=list)     # no clear key only: e.g. ["A#5", "B5"]
+    resonance_hz: list = field(default_factory=list)   # their frequencies
+    fits: list = field(default_factory=list)           # keys containing the resonance notes
+    fits_partial: bool = False    # True: no key contains all resonance notes, fits contain most
     hpcp: list = None             # 12 bins, C..B, averaged and normalised (max 1)
     correlations: list = None     # 24 values: C..B major, then C..B minor
 
@@ -95,6 +110,7 @@ class KeyResult:
         d = asdict(self)
         for k in ("confidence", "strength", "tonality"):
             d[k] = round(float(d[k]), 3)
+        d["resonance_hz"] = [round(float(x), 1) for x in d["resonance_hz"]]
         for k in ("hpcp", "correlations"):
             if d[k] is not None:
                 d[k] = [round(float(x), 4) for x in d[k]]
@@ -155,11 +171,17 @@ def mean_hpcp(y: np.ndarray) -> np.ndarray:
 
 def tonality(y: np.ndarray, sr: int = SR) -> float:
     """Share of the 50 Hz - 5 kHz energy that sits in clear spectral peaks (0 = noise)."""
+    return tonal_analysis(y, sr)[0]
+
+
+def tonal_analysis(y: np.ndarray, sr: int = SR):
+    """(tonality, resonances): the noise-gate measure and the prominent peaks of the averaged
+    spectrum as [(midi note, frequency Hz, power)], strongest first (see resonances())."""
     ch = _chain()
     k = np.arange(TONAL_FRAME // 2 + 1) * (sr / TONAL_FRAME)
     lo = int(np.searchsorted(k, TONAL_FMIN))
     hi = int(np.searchsorted(k, TONAL_FMAX))
-    energies, peaks = [], []
+    energies, peaks, spectra = [], [], []
     for frame in _frames(y, TONAL_FRAME, TONAL_HOP, start_from_zero=True):
         mag = ch.tonal_spectrum(ch.tonal_window(frame))
         p = mag[lo - 1:hi + 1].astype(np.float64) ** 2            # one guard bin each side
@@ -168,12 +190,67 @@ def tonality(y: np.ndarray, sr: int = SR) -> float:
         is_peak = (c > p[:-2]) & (c >= p[2:]) & (c > TONAL_PEAK_RATIO * local[1:-1])
         energies.append(float(np.sum(p)))
         peaks.append(float(np.sum(c[is_peak])))
+        spectra.append(p)
     if not energies:
-        return 0.0
+        return 0.0, []
     e = np.array(energies)
     keep = e > 1e-4 * e.max()
     tot = float(e[keep].sum())
-    return float(np.clip(np.array(peaks)[keep].sum() / tot, 0.0, 1.0)) if tot > 0 else 0.0
+    tonal = float(np.clip(np.array(peaks)[keep].sum() / tot, 0.0, 1.0)) if tot > 0 else 0.0
+    avg = np.mean(np.array(spectra)[keep], axis=0)
+    return tonal, resonances(avg, lo - 1, sr, int(keep.sum()))
+
+
+def resonances(avg: np.ndarray, first_bin: int, sr: int, frames: int):
+    """Prominent peaks of the time-averaged power spectrum (bins first_bin.. of the tonal FFT).
+
+    A peak is a local maximum >= 80 Hz whose power is more than RES_RATIO (scaled up for few
+    frames) times the 81-bin local average. Its frequency is refined by a parabola through the
+    log powers; peaks that round to the same note are merged (the strongest stays).
+    Returns up to RES_MAX (midi note, Hz, power) tuples, strongest first.
+    """
+    bin_hz = sr / TONAL_FRAME
+    ratio = RES_RATIO * max(1.0, float(np.sqrt(RES_FULL_FRAMES / max(frames, 1))))
+    local = _moving_average(avg, RES_AVG_BINS) + 1e-20
+    best = {}
+    for j in range(1, len(avg) - 1):
+        c = avg[j]
+        if (first_bin + j) * bin_hz < RES_FMIN or not (c > avg[j - 1] and c >= avg[j + 1]
+                                                        and c > ratio * local[j]):
+            continue
+        a, b, d = np.log(avg[j - 1:j + 2])
+        freq = (first_bin + j + 0.5 * (a - d) / (a - 2 * b + d)) * bin_hz
+        midi = int(np.floor(69 + 12 * np.log2(freq / 440.0) + 0.5))
+        if midi not in best or c > best[midi][2]:
+            best[midi] = (midi, freq, float(c))
+    ranked = sorted(best.values(), key=lambda t: (-t[2], t[1]))
+    return ranked[:RES_MAX]
+
+
+def note_name(midi: int) -> str:
+    """'A#5' for MIDI note 82 (A4 = 69, sharps)."""
+    return "%s%d" % (PITCH_NAMES[midi % 12], midi // 12 - 1)
+
+
+def fitting_keys(pitch_classes):
+    """Major/minor keys whose scale contains all pitch classes (else the most), best first.
+
+    Ranked by (notes contained, tonic among the pitch classes, fifth among them), then major
+    before minor and C..B. Returns (up to FITS_MAX key names, partial).
+    """
+    pcs = set(pitch_classes)
+    if not pcs:
+        return [], False
+    cands = []
+    for minor in (False, True):
+        scale = MINOR_SCALE if minor else MAJOR_SCALE
+        for tonic in range(12):
+            inside = {(tonic + s) % 12 for s in scale}
+            cands.append((-len(pcs & inside), -((tonic in pcs) * 2 + ((tonic + 7) % 12 in pcs)),
+                          len(cands), key_name(tonic, minor)))
+    cands.sort()
+    most = -cands[0][0]
+    return [c[3] for c in cands if -c[0] == most][:FITS_MAX], most < len(pcs)
 
 
 def _moving_average(p: np.ndarray, n: int) -> np.ndarray:
@@ -222,11 +299,17 @@ def correlations(pcp_ess: np.ndarray, profile: str) -> np.ndarray:
     return out
 
 
-def _result_from_hpcp(hpcp: np.ndarray, tonal: float, profile: str) -> KeyResult:
+def _resonance_fields(res) -> Dict:
+    fits, partial = fitting_keys([m % 12 for m, _, _ in res])
+    return dict(resonances=[note_name(m) for m, _, _ in res], resonance_hz=[f for _, f, _ in res],
+                fits=fits, fits_partial=partial)
+
+
+def _result_from_hpcp(hpcp: np.ndarray, tonal: float, res, profile: str) -> KeyResult:
     pcp = prepare_pcp(hpcp)
     if float(np.max(pcp)) <= 0:
         return KeyResult(False, None, None, 0.0, None, None, 0.0, tonal,
-                         reason="no pitched content", profile=profile)
+                         reason="no pitched content", profile=profile, **_resonance_fields(res))
     key, scale, strength, _ = _chain().key_algo(profile)(pcp)
     strength = float(strength)
     minor = scale == "minor"
@@ -242,6 +325,7 @@ def _result_from_hpcp(hpcp: np.ndarray, tonal: float, profile: str) -> KeyResult
                      confidence=confidence_from_strength(strength), second_key=k2,
                      second_camelot=c2, strength=strength, tonality=tonal, reason=reason,
                      best_guess=k1, profile=profile,
+                     **({} if clear else _resonance_fields(res)),
                      hpcp=[float(pcp[(i + 3) % 12]) for i in range(12)],   # A..Ab -> C..B
                      correlations=corr.tolist())
 
@@ -258,7 +342,8 @@ def analyze(y: np.ndarray, sr: int = SR, profile: str = DEFAULT_PROFILE) -> KeyR
     if peak < SILENCE_PEAK:
         return KeyResult(False, None, None, 0.0, None, None, 0.0, 0.0, reason="silence",
                          profile=profile)
-    return _result_from_hpcp(mean_hpcp(y), tonality(y, sr), profile)
+    tonal, res = tonal_analysis(y, sr)
+    return _result_from_hpcp(mean_hpcp(y), tonal, res, profile)
 
 
 def detect_key(path: str, profile: str = DEFAULT_PROFILE) -> KeyResult:

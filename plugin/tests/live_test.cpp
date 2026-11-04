@@ -64,12 +64,17 @@ int main (int argc, char* argv[])
             }
         std::this_thread::sleep_for (std::chrono::milliseconds (1500));
         auto snap = live.getSnapshot();
-        const bool same = snap.hasResult && snap.result.clear == ref.clear && snap.result.bestGuess == ref.bestGuess;
+        const bool same = snap.hasResult && snap.result.clear == ref.clear && snap.result.bestGuess == ref.bestGuess
+                          && snap.result.resonances == ref.resonances && snap.result.fits == ref.fits;
         auto name = [] (const kd::KeyResult& k) { return k.clear ? k.key : "(" + k.reason + ")"; };
         std::printf ("%-44s %5.0f Hz  file: %-14s looped: %-14s live (%4.1f s): %-14s %s\n",
                      file.getFileName().toRawUTF8(), sr, name (single).c_str(), name (ref).c_str(), snap.secondsHeard,
                      snap.hasResult ? (snap.result.clear ? snap.result.key.c_str() : ("(" + snap.result.reason + ")").c_str()) : "listening",
                      same ? "OK" : "DIFF");
+        if (snap.hasResult && ! snap.result.clear)
+            std::printf ("    resonances file: %s | looped: %s | live: %s | fits live: %s\n",
+                         kd::joinWithDots (single.resonances).c_str(), kd::joinWithDots (ref.resonances).c_str(),
+                         kd::joinWithDots (snap.result.resonances).c_str(), kd::joinWithDots (snap.result.fits).c_str());
         failures += same ? 0 : 1;
 
         live.requestReset();

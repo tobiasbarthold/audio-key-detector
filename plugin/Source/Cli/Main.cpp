@@ -61,6 +61,14 @@ int main (int argc, char* argv[])
             obj->setProperty ("tonality", r.tonality);
             obj->setProperty ("reason", juce::String (r.reason));
             obj->setProperty ("best_guess", str (r.bestGuess));
+            juce::Array<juce::var> res, hz, fits;
+            for (auto& v : r.resonances) res.add (juce::String (v));
+            for (auto v : r.resonanceHz) hz.add (std::round (v * 10.0f) / 10.0f);
+            for (auto& v : r.fits) fits.add (juce::String (v));
+            obj->setProperty ("resonances", res);
+            obj->setProperty ("resonance_hz", hz);
+            obj->setProperty ("fits", fits);
+            obj->setProperty ("fits_partial", r.fitsPartial);
             juce::Array<juce::var> h, c;
             for (auto v : r.hpcp) h.add (v);
             for (auto v : r.correlations) c.add (v);

@@ -31,7 +31,11 @@ def format_result(path: str, r) -> str:
         return "%s\n  %s  (%s)  confidence %.2f  |  2nd: %s (%s)" % (
             name, r.key, r.camelot, r.confidence, r.second_key, r.second_camelot)
     guess = "; best guess %s" % r.best_guess if r.best_guess else ""
-    return "%s\n  no clear key  (%s%s)" % (name, r.reason, guess)
+    out = "%s\n  no clear key  (%s%s)" % (name, r.reason, guess)
+    if r.resonances:
+        out += "\n  resonances: %s" % " \u00b7 ".join(r.resonances)
+        out += "\n  fits: %s%s" % (" \u00b7 ".join(r.fits), " (partial)" if r.fits_partial else "")
+    return out
 
 
 def main(argv=None) -> int:

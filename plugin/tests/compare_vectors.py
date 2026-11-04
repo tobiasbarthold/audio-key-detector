@@ -5,8 +5,8 @@
 
 Without extra paths it checks tests/vectors/*.wav against tests/vectors/expected.json.
 Extra files (e.g. real loops) are analysed by both implementations and compared directly.
-Exit code 1 if key, Camelot, second key, best guess, "clear" or reason differ, or if
-confidence / strength / tonality differ by more than 0.01.
+Exit code 1 if key, Camelot, second key, best guess, "clear", reason, resonances or fits differ, or if
+confidence / strength / tonality differ by more than 0.01 or a resonance frequency by more than 1 Hz.
 """
 import json
 import os
@@ -18,7 +18,7 @@ sys.path.insert(0, ROOT)
 from keydetect.cli import collect_files  # noqa: E402
 from keydetect.detect import detect_key  # noqa: E402
 
-EXACT = ("key", "camelot", "second_key", "best_guess", "clear", "reason")
+EXACT = ("key", "camelot", "second_key", "best_guess", "clear", "reason", "resonances", "fits", "fits_partial")
 CLOSE = ("confidence", "strength", "tonality")
 
 
@@ -31,6 +31,9 @@ def compare(name, got, exp):
     bad = ["%s: C++ %r vs Python %r" % (k, got.get(k), exp.get(k)) for k in EXACT if got.get(k) != exp.get(k)]
     bad += ["%s: C++ %.4f vs Python %.4f" % (k, got[k], exp[k]) for k in CLOSE
             if abs(float(got[k]) - float(exp[k])) > 0.01]
+    bad += ["resonance_hz: C++ %r vs Python %r" % (got.get("resonance_hz"), exp.get("resonance_hz"))
+            for _ in [0] if len(got.get("resonance_hz", [])) != len(exp.get("resonance_hz", []))
+            or any(abs(a - b) > 1.0 for a, b in zip(got.get("resonance_hz", []), exp.get("resonance_hz", [])))]
     print("%-50s %-10s %-4s %s" % (name[:50], exp.get("key") or "(%s)" % exp["reason"], exp.get("camelot") or "",
                                    "OK" if not bad else "DIFF  " + "; ".join(bad)))
     return not bad

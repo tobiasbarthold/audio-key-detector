@@ -11,7 +11,7 @@ import sys
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, iirpeak, lfilter, sosfilt
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -28,6 +28,13 @@ def vectors():
     sos = butter(4, [900 / (SR / 2), 1060 / (SR / 2)], btype="band", output="sos")
     bp = sosfilt(sos, rs.randn(3 * SR))
     bp = 0.5 * bp / np.max(np.abs(bp))
+    # white noise plus three narrow resonances (A#5, B5, F#6): no clear key, but resonances
+    wn = np.random.RandomState(2).randn(3 * SR)
+    rn = wn.copy()
+    for f, g in ((926, 4.0), (980, 3.2), (1491, 2.4)):
+        b, a = iirpeak(f / (SR / 2), 100)
+        rn += g * lfilter(b, a, wn)
+    rn = 0.5 * rn / np.max(np.abs(rn))
     return {
         "c_major_triads": progression(0, False, dur=0.75),
         "a_minor_triads": progression(9, True, dur=0.75),
@@ -37,6 +44,7 @@ def vectors():
         "white_noise": noise,
         "bandpassed_noise_980hz": bp,
         "silence": np.zeros(SR),
+        "resonant_noise_926_980_1491": rn,
     }
 
 

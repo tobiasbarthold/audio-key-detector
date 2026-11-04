@@ -95,6 +95,36 @@ loops as "mostly noise"; of the evaluation files it gates 4 that were wrong anyw
 detected very short chord stabs. Heavily distorted material can fall below the gate although it
 has a key.
 
+### Resonances and fitting keys (only for "no clear key")
+
+A noise sweep or an atonal FX has no key, but it can still have a few strong resonances. For
+every result that is not clear (mostly noise, or no pitched content) the same 16384-sample frames
+as in the gate are used:
+
+* **Averaged spectrum:** the power spectra (50 Hz - 5 kHz) of the frames that pass the energy
+  check above are averaged. Averaging makes the result independent of where the frames fall, so
+  a looped clip gives the same resonances as the single file (checked on Swell Short Noise).
+* **Peaks:** local maxima (same neighbour rule as above) from **80 Hz** with power more than
+  **5x** the 81-bin moving average (about 220 Hz wide). With fewer than 20 frames the average is
+  noisier, so the ratio is multiplied by `sqrt(20 / frames)`. If nothing qualifies, no
+  resonance is reported.
+* **Frequency and note:** parabolic interpolation on the log power of the peak bin and its
+  neighbours; note = nearest MIDI note (A4 = 69 = 440 Hz), written with sharps and octave
+  (`A#5`). Peaks that round to the same note are merged (the strongest stays).
+* **Result:** the **3 strongest** by peak power, strongest first. Swell Short Noise: 926 Hz
+  `A#5`, 980 Hz `B5`, 1491 Hz `F#6`; the weaker 4th/5th peaks (1125 and 1561 Hz) are cut off.
+  White noise and band-passed noise give none (the same measure on 12 s of noise has no peak above
+  about 1.5x).
+* **Fitting keys:** of the 24 major/minor keys (natural minor scale), those whose scale contains
+  the pitch classes of all resonances. If no key contains all, those containing the most, flagged
+  `fits_partial` (shown as "partly"). Ranked by: notes contained, tonic among the resonances,
+  fifth among the resonances, then major before minor and C..B; at most **4** are listed. Names
+  as everywhere else (`Eb minor`, `F# major`). For the swell (A#, B, F#): B major, F# major,
+  Eb minor, G# minor.
+
+The values come from this one reference sound and the synthetic vector
+`resonant_noise_926_980_1491`; they are not tuned on a larger set. Tonal results are unchanged.
+
 ## 4. Names and Camelot codes
 
 * Major names: `C Db D Eb E F F# G Ab A Bb B`; minor names: `C C# D Eb E F F# G G# A Bb B`.
@@ -166,8 +196,8 @@ all checked files agree.
 `tests/vectors/*.wav` (mono, 44.1 kHz, 16-bit, 1-3 s, synthetic) are produced by
 `scripts/make_test_vectors.py`; `tests/vectors/expected.json` holds the Python output for each
 (`key`, `camelot`, `second_key`, `confidence`, `strength`, `tonality`, `clear`, `reason`,
-`best_guess`, the 12 `hpcp` bins C..B and the 24 `correlations`). The C++ engine is checked against
+`best_guess`, `resonances`, `resonance_hz`, `fits`, `fits_partial`, the 12 `hpcp` bins C..B and the 24 `correlations`). The C++ engine is checked against
 the same file by `plugin/tests/compare_vectors.py`, which can also compare both implementations
 directly on any folder: on all 502 files of the Core Library's `Samples/Loops`, `One Shots/Stab`,
-`One Shots/Instrument` and `One Shots/FX` (44.1 and 48 kHz) key, second key, best guess and
-"no clear key" decision are identical and confidence/strength/tonality differ by less than 0.01.
+`One Shots/Instrument` and `One Shots/FX` (44.1 and 48 kHz) key, second key, best guess,
+"no clear key" decision, resonances and fits are identical and confidence/strength/tonality differ by less than 0.01.

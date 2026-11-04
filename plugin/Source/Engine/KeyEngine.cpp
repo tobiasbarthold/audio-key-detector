@@ -42,6 +42,19 @@ constexpr int kTonalAvgBins = 41;
 constexpr double kNoiseTonality = 0.0027;
 constexpr float kSilencePeak = 1e-5f;
 
+// Resonances of a "no clear key" sound (same values as detect.py)
+constexpr double kResFMin = 80.0;
+constexpr int kResAvgBins = 81;
+constexpr double kResRatio = 5.0;
+constexpr int kResFullFrames = 20;
+constexpr size_t kResMax = 3;
+constexpr size_t kFitsMax = 4;
+const int kMajorScale[7] = { 0, 2, 4, 5, 7, 9, 11 };
+const int kMinorScale[7] = { 0, 2, 3, 5, 7, 8, 10 };
+const char* const kPitchNames[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+
+struct Resonance { int midi; double hz; double power; };
+
 // shaath profile as in Essentia's key.cpp (index 0 = tonic); used for all 24 correlations
 const double kMajor[12] = { 6.6, 2.0, 3.5, 2.3, 4.6, 4.0, 2.5, 5.2, 2.4, 3.7, 2.3, 3.4 };
 const double kMinor[12] = { 6.5, 2.7, 3.5, 5.4, 2.6, 3.5, 2.5, 5.2, 4.0, 2.7, 4.3, 3.2 };
@@ -106,7 +119,63 @@ std::array<float, 24> allCorrelations (const std::vector<Real>& pcp)
     return out;
 }
 
+// Prominent peaks of the time-averaged power spectrum (bins firstBin.. of the tonal FFT);
+// mirrors resonances() in detect.py. Strongest first, at most kResMax.
+std::vector<Resonance> findResonances (const std::vector<double>& avg, int firstBin, int frames)
+{
+    const double binHz = kSampleRate / kTonalFrame;
+    const double ratio = kResRatio * std::max (1.0, std::sqrt ((double) kResFullFrames / std::max (frames, 1)));
+    const int n = (int) avg.size(), half = kResAvgBins / 2;
+    std::vector<double> padded ((size_t) (n + 2 * half)), cum (padded.size() + 1);
+    for (int j = 0; j < half; ++j)
+    {
+        padded[(size_t) j] = avg.front();
+        padded[(size_t) (n + half + j)] = avg.back();
+    }
+    std::copy (avg.begin(), avg.end(), padded.begin() + half);
+    cum[0] = 0.0;
+    for (size_t j = 0; j < padded.size(); ++j)
+        cum[j + 1] = cum[j] + padded[j];
+
+    std::map<int, Resonance> best;
+    for (int j = 1; j < n - 1; ++j)
+    {
+        const double c = avg[(size_t) j];
+        const double local = (cum[(size_t) (j + kResAvgBins)] - cum[(size_t) j]) / kResAvgBins + 1e-20;
+        if ((firstBin + j) * binHz < kResFMin || ! (c > avg[(size_t) (j - 1)] && c >= avg[(size_t) (j + 1)] && c > ratio * local))
+            continue;
+        const double a = std::log (avg[(size_t) (j - 1)]), b = std::log (c), d = std::log (avg[(size_t) (j + 1)]);
+        const double freq = (firstBin + j + 0.5 * (a - d) / (a - 2 * b + d)) * binHz;
+        const int midi = (int) std::floor (69.0 + 12.0 * std::log2 (freq / 440.0) + 0.5);
+        auto it = best.find (midi);
+        if (it == best.end() || c > it->second.power)
+            best[midi] = { midi, freq, c };
+    }
+    std::vector<Resonance> ranked;
+    for (auto& kv : best)
+        ranked.push_back (kv.second);
+    std::sort (ranked.begin(), ranked.end(), [] (const Resonance& x, const Resonance& y)
+               { return x.power != y.power ? x.power > y.power : x.hz < y.hz; });
+    if (ranked.size() > kResMax)
+        ranked.resize (kResMax);
+    return ranked;
+}
+
 } // namespace
+
+std::string noteName (int midi)
+{
+    const int pc = ((midi % 12) + 12) % 12;
+    return std::string (kPitchNames[pc]) + std::to_string ((midi - pc) / 12 - 1);
+}
+
+std::string joinWithDots (const std::vector<std::string>& items)
+{
+    std::string out;
+    for (auto& it : items)
+        out += (out.empty() ? "" : " \xc2\xb7 ") + it;
+    return out;
+}
 
 std::string keyName (int pc, bool minor)
 {
@@ -119,6 +188,49 @@ std::string camelotCode (int pc, bool minor)
     int ref = minor ? (pc + 3) % 12 : pc % 12;
     return std::to_string (((7 * ref + 7) % 12) + 1) + (minor ? "A" : "B");
 }
+
+namespace
+{
+// Major/minor keys whose scale contains all pitch classes (else the most), best first; mirrors
+// fitting_keys() in detect.py: ranked by (notes contained, tonic among them, fifth among them),
+// then major before minor and C..B.
+void fillResonances (KeyResult& r, const std::vector<Resonance>& res)
+{
+    bool has[12] = {};
+    int count = 0;
+    for (auto& x : res)
+    {
+        const int pc = ((x.midi % 12) + 12) % 12;
+        count += has[pc] ? 0 : 1;
+        has[pc] = true;
+        r.resonances.push_back (noteName (x.midi));
+        r.resonanceHz.push_back ((float) x.hz);
+    }
+    if (count == 0)
+        return;
+    struct Cand { int contained, pref, index; };
+    std::vector<Cand> cands;
+    for (int minor = 0; minor < 2; ++minor)
+        for (int tonic = 0; tonic < 12; ++tonic)
+        {
+            bool inside[12] = {};
+            for (int st : minor ? kMinorScale : kMajorScale)
+                inside[(tonic + st) % 12] = true;
+            int contained = 0;
+            for (int pc = 0; pc < 12; ++pc)
+                contained += (has[pc] && inside[pc]) ? 1 : 0;
+            cands.push_back ({ contained, (has[tonic] ? 2 : 0) + (has[(tonic + 7) % 12] ? 1 : 0), minor * 12 + tonic });
+        }
+    std::sort (cands.begin(), cands.end(), [] (const Cand& a, const Cand& b)
+               { return a.contained != b.contained ? a.contained > b.contained
+                      : a.pref != b.pref ? a.pref > b.pref : a.index < b.index; });
+    const int most = cands.front().contained;
+    for (auto& c : cands)
+        if (c.contained == most && r.fits.size() < kFitsMax)
+            r.fits.push_back (keyName (c.index % 12, c.index >= 12));
+    r.fitsPartial = most < count;
+}
+} // namespace
 
 float confidenceFromStrength (float strength)
 {
@@ -200,8 +312,9 @@ struct KeyEngine::Impl
         return mean;
     }
 
-    // Share of the 50 Hz - 5 kHz energy in clear spectral peaks (0 = noise).
-    double tonality (const std::vector<Real>& y)
+    // Share of the 50 Hz - 5 kHz energy in clear spectral peaks (0 = noise); also finds the
+    // resonances of the time-averaged spectrum.
+    double tonality (const std::vector<Real>& y, std::vector<Resonance>& resonances)
     {
         std::vector<Real> frame, windowed, mag;
         tonalCutter->reset();
@@ -219,6 +332,7 @@ struct KeyEngine::Impl
         const int half = kTonalAvgBins / 2;
         std::vector<double> p ((size_t) nb), padded ((size_t) (nb + 2 * half)), cum ((size_t) (nb + 2 * half + 1));
         std::vector<double> energies, peakEnergies;
+        std::vector<std::vector<double>> spectra;
 
         for (;;)
         {
@@ -253,21 +367,30 @@ struct KeyEngine::Impl
             }
             energies.push_back (e);
             peakEnergies.push_back (pe);
+            spectra.push_back (p);
         }
         if (energies.empty())
             return 0.0;
         const double emax = *std::max_element (energies.begin(), energies.end());
         double tot = 0.0, pk = 0.0;
+        std::vector<double> avg ((size_t) nb, 0.0);
+        int kept = 0;
         for (size_t i = 0; i < energies.size(); ++i)
             if (energies[i] > 1e-4 * emax)
             {
                 tot += energies[i];
                 pk += peakEnergies[i];
+                for (size_t j = 0; j < avg.size(); ++j)
+                    avg[j] += spectra[i][j];
+                ++kept;
             }
+        for (auto& v : avg)
+            v /= kept;
+        resonances = findResonances (avg, lo - 1, kept);
         return tot > 0.0 ? std::clamp (pk / tot, 0.0, 1.0) : 0.0;
     }
 
-    KeyResult fromHpcp (std::vector<Real> pcp, float tonal)
+    KeyResult fromHpcp (std::vector<Real> pcp, float tonal, const std::vector<Resonance>& res)
     {
         KeyResult r;
         r.tonality = tonal;
@@ -282,6 +405,7 @@ struct KeyEngine::Impl
         if (*std::max_element (pcp.begin(), pcp.end()) <= 0.0f)
         {
             r.reason = "no pitched content";
+            fillResonances (r, res);
             return r;
         }
         std::string keyStr, scale;
@@ -316,6 +440,8 @@ struct KeyEngine::Impl
             r.key = r.bestGuess;
             r.camelot = camelotCode (pc, minor);
         }
+        else
+            fillResonances (r, res);
         return r;
     }
 };
@@ -346,8 +472,9 @@ KeyResult KeyEngine::analyze (const float* samples, std::size_t numSamples)
     }
     try
     {
-        auto tonal = (float) impl->tonality (y);
-        return impl->fromHpcp (impl->meanHpcp (y), tonal);
+        std::vector<Resonance> res;
+        auto tonal = (float) impl->tonality (y, res);
+        return impl->fromHpcp (impl->meanHpcp (y), tonal, res);
     }
     catch (const std::exception& e)
     {
