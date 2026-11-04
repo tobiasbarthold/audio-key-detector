@@ -41,7 +41,7 @@ MAX_SECONDS = 240.0  # analyse the middle 4 minutes of very long files
 
 PEAK_RATIO = 10.0          # peak power vs local average power
 NOISE_TONALITY = 0.20      # below: "mostly noise"
-MIN_CONFIDENCE = 0.04      # below: "no clear key"
+MIN_CONFIDENCE = 0.02      # below: "no clear key"
 MIN_BEST_CORR = 0.35
 
 NOTE_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
@@ -100,6 +100,8 @@ class KeyResult:
     strongest_hz: Optional[float] = None
     strongest_note: Optional[str] = None
     chroma: list = field(default_factory=list)
+    correlations: list = field(default_factory=list)  # 24 values: 12 major then 12 minor (C..B)
+    n_peaks: int = 0
 
     def to_dict(self) -> Dict:
         d = asdict(self)
@@ -107,6 +109,7 @@ class KeyResult:
         d["tuning_cents"] = round(d["tuning_cents"], 1)
         d["tonality"] = round(d["tonality"], 3)
         d["chroma"] = [round(float(x), 4) for x in d["chroma"]]
+        d["correlations"] = [round(float(x), 4) for x in d["correlations"]]
         if d["strongest_hz"] is not None:
             d["strongest_hz"] = round(d["strongest_hz"], 1)
         return d
@@ -183,7 +186,8 @@ def analyze(y: np.ndarray, sr: int = SR) -> KeyResult:
     strongest_note = freq_to_note(strongest_hz)
 
     def result(**kw):
-        base = dict(tonality=tonality, strongest_hz=strongest_hz, strongest_note=strongest_note)
+        base = dict(tonality=tonality, strongest_hz=strongest_hz, strongest_note=strongest_note,
+                    n_peaks=int(len(pf)))
         base.update(kw)
         return KeyResult(**base)
 
@@ -244,7 +248,8 @@ def analyze(y: np.ndarray, sr: int = SR) -> KeyResult:
         clear=clear, key=k1 if clear else None, camelot=c1 if clear else None,
         confidence=confidence, second_key=k2, second_camelot=c2, tuning_cents=tuning,
         tonality=tonality, reason=reason, best_guess=k1,
-        strongest_hz=strongest_hz, strongest_note=strongest_note, chroma=chroma.tolist())
+        strongest_hz=strongest_hz, strongest_note=strongest_note, chroma=chroma.tolist(),
+        correlations=corr.tolist(), n_peaks=int(len(pf)))
 
 
 def detect_key(path: str) -> KeyResult:

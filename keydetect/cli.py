@@ -63,6 +63,7 @@ def main(argv=None) -> int:
         if args.json:
             d = r.to_dict()
             d.pop("chroma", None)
+            d.pop("correlations", None)
             d["file"] = f
             out.append(d)
         else:
